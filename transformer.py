@@ -136,24 +136,40 @@ class MiniGPT(PreTrainedModel):
         self.out_head = nn.Linear(config.emb_dim, config.vocab_size)
         self.out = CausalLMOutputWithPast()
 
-    def forward(self, 
-                inputs:Optional[torch.Tensor]=None, 
-                attention_mask:Optional[torch.Tensor]=None, 
+    def forward(self,
+                inputs:Optional[torch.Tensor]=None,
+                attention_mask:Optional[torch.Tensor]=None,
+                position_ids:Optional[torch.Tensor]=None,
                 use_kv_cache=False,
                 past_kvs=None,
                 return_dict=False,
                 **kwargs):
-        
+
         if not past_kvs:
             past_kvs = [None for _ in range(self.n_layers)]
         if 'input_ids' in kwargs:
             inputs = kwargs['input_ids']
         assert isinstance(inputs, torch.Tensor), f"expect torch.Tensor, but got{type(inputs)}"
         b, seq_len = inputs.shape
-        pos_cis = self.pos_cis[:seq_len]
+
+        # 位置编码：增量推理时只处理最新 token，需按绝对位置取旋转编码，而非窗口内相对位置
+        if position_ids is None:
+            if use_kv_cache and past_kvs[0] is not None:
+                start_pos = past_kvs[0][0].shape[1]  # 已缓存的 kv 长度即当前 token 的绝对位置
+            else:
+                start_pos = 0
+            position_ids = torch.arange(start_pos, start_pos + seq_len, device=inputs.device)
+
+        # pos_cis 只预计算了 context_length 长度，超出时按需动态扩展
+        # 注意：pos_cis 的最后一维是 head_dim/2，而 precompute_pos_cis 需要传完整 head_dim
+        max_pos = position_ids.max().item()
+        if max_pos >= self.pos_cis.shape[0]:
+            self.pos_cis = precompute_pos_cis(self.pos_cis.shape[1] * 2, max_pos + 1).to(self.pos_cis.device)
+        pos_cis = self.pos_cis[position_ids]
+
         x = self.token_emb(inputs)
         x = self.drop_emb(x)
-        
+
         # 支持注意力掩码计算（1=有效，0=填充）
         if attention_mask is not None:
             assert isinstance(attention_mask, torch.Tensor), f"expect torch.Tensor, but got{type(attention_mask)}"
@@ -167,7 +183,7 @@ class MiniGPT(PreTrainedModel):
         logits = self.out_head(x)
         if not return_dict:
             return logits
-        
+
         self.out.__setitem__('logits', logits)
         self.out.__setitem__('past_kvs', past_kvs)
         return self.out
@@ -177,26 +193,23 @@ class MiniGPT(PreTrainedModel):
         assert isinstance(max_length, int) and max_length > 0
         eos_reached = torch.zeros(len(input_ids), dtype=torch.bool, device=input_ids.device)
         past_kvs = None
-        return_dict=True
         attention_mask = None
-        
-        if 'use_kv_cache' in kwargs:
-            use_kv_cache = kwargs['use_kv_cache']
-            del kwargs['use_kv_cache']
-        else:
-            use_kv_cache = True
-        # print("use_kv_cache: ", use_kv_cache)
-         
+        use_kv_cache = kwargs.pop('use_kv_cache', True)
+
         for _ in range(max_length):
-            # 如果生成序列过程中超出上下文长度，则由后往前截取context_length个token。
-            context_ids = input_ids[:, -self.context_length:]  
-            with torch.no_grad():
-                output = self(context_ids, attention_mask, use_kv_cache, past_kvs, return_dict, **kwargs)  # shape: batch, n_tokens, vocab_size
+            if use_kv_cache:
+                # 增量推理：第一步用完整 prompt，之后每步只送入最新 1 个 token
+                step_input = input_ids if past_kvs is None else input_ids[:, -1:]
+            else:
+                # 不使用缓存时，每次都对最后 context_length 个 token 完整前向
+                step_input = input_ids[:, -self.context_length:]
+            output = self(step_input, attention_mask=attention_mask, use_kv_cache=use_kv_cache,
+                          past_kvs=past_kvs, return_dict=True, **kwargs)  # shape: batch, n_tokens, vocab_size
             past_kvs = output["past_kvs"] if use_kv_cache else None
             # 只取每个序列最后一个token的输出向量作为logits, shape变为: batch, vocab_size
-            logits = output["logits"][:, -1, :]        
+            logits = output["logits"][:, -1, :]
             # 使用softmax函数将logits转换为下一个token的概率分布，shape仍是: batch, vocab_size
-            probs = torch.softmax(logits, dim=-1)   
+            probs = torch.softmax(logits, dim=-1)
             # 取概率最大的作为next_input_ids，形状变为：batch, 1
             next_token_ids = torch.argmax(probs, dim=-1, keepdim=True)
             # 将next_token_id连接到下一个token的结尾， 形状变为：batch, n_tokens+1
