@@ -2,16 +2,13 @@ import os
 import math
 import torch
 import time
-import torch.nn as nn
 import torch.nn.functional as f
 from contextlib import nullcontext
 import torch.distributed as dist
 from datetime import timedelta
-from transformers import AutoTokenizer
-from torch.utils.tensorboard import SummaryWriter
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler, random_split
-from torch.distributed import init_process_group, destroy_process_group 
+from torch.distributed import init_process_group, destroy_process_group
 from transformer import GPTConfig, MiniGPT
 
 
@@ -31,6 +28,12 @@ class Trainer:
         self.save_steps = train_args.get("save_steps", 10000)
         self.warmup_steps = train_args.get("warmup_steps", 1000)
         self.use_mixed_precision = train_args.get("use_mixed_precision", False)
+        # 混合精度类型：float16（需 GradScaler）或 bfloat16（指数位与 fp32 相同，无需 scaling）
+        amp_dtype_name = train_args.get("mixed_precision_dtype", "float16")
+        self.amp_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}.get(amp_dtype_name, torch.float16) \
+            if self.use_mixed_precision else None
+        self.gradient_accumulation_steps = max(1, int(train_args.get("gradient_accumulation_steps", 1)))
+        self.micro_step = 0
         self.output_dir = train_args.get("output_dir")
         self.last_checkpoint_path = train_args.get("last_checkpoint_path")
         self.train_set = None
@@ -80,7 +83,9 @@ class Trainer:
                                       drop_last=False,
                                       collate_fn=self.batch_collator)
         self.steps_per_epoch = len(self.train_loader)
-        self.total_steps = self.num_epochs * self.steps_per_epoch
+        # 梯度累积下，优化器更新次数 = 微批次数 / 累积步数（用于 LR 调度与总步数）
+        self.updates_per_epoch = self.steps_per_epoch // self.gradient_accumulation_steps
+        self.total_steps = self.num_epochs * self.updates_per_epoch
         print(f'init train_loader steps: {len(self.train_loader)}, eval_loader: {len(self.eval_loader)}') if self.verbose else None
 
     def _save_model(self, checkpoint_path, epoch):
@@ -141,11 +146,12 @@ class Trainer:
         return model
     
     def _init_grad_scaler(self):
-        if self.use_mixed_precision:
+        # bfloat16 指数位与 fp32 相同、数值范围一致，无需 loss scaling；仅 float16 需要 GradScaler
+        if self.use_mixed_precision and self.amp_dtype == torch.float16:
             self.scaler = torch.amp.GradScaler('cuda', enabled=True)
         else:
             self.scaler = None
-        print("init grad scaler: ", self.use_mixed_precision) if self.verbose else None
+        print(f"init grad scaler: {self.scaler is not None}, amp_dtype: {self.amp_dtype}") if self.verbose else None
 
     def _calc_grad_norm(self):
         # 计算梯度范数，梯度范数为所有参数平方和的平方根。先为每一层计算梯度范数，再计算所有层合在一起的梯度范数。
@@ -196,7 +202,8 @@ class Trainer:
             return
 
         if self.is_main_process:
-            train_loss = self.train_loss_acc/self.eval_steps
+            # 梯度累积下，每个 step 之间会累积多个 micro-batch 的 loss，故分母要乘累积步数
+            train_loss = self.train_loss_acc / (self.eval_steps * self.gradient_accumulation_steps)
             eval_loss = self._evaluate()
             grad_norm = self._calc_grad_norm()
             self._record_metrics(train_loss, eval_loss, grad_norm, lr)
@@ -255,47 +262,60 @@ class Trainer:
         print(f"{self.cur_time()} barrier wait over of device:{self.device} at step: {self.step}.")
     
     def _train_step(self, X, Y, attnmask):
-        enable_mixed_precision = X.device.type == "cuda" and self.scaler is not None
-        ctx = (torch.amp.autocast('cuda') if enable_mixed_precision else nullcontext())  
-        
-        self.optimizer.zero_grad(set_to_none=True)
+        use_amp = X.device.type == "cuda" and self.amp_dtype is not None
+        ctx = torch.amp.autocast('cuda', dtype=self.amp_dtype) if use_amp else nullcontext()
+
         with ctx:
             logits = self.model(X, attention_mask=attnmask)
             loss = f.cross_entropy(logits.flatten(0, 1), Y.flatten())
-    
-        if enable_mixed_precision:  # 检查是否使用混合精度
-            self.scaler.scale(loss).backward()
+
+        # 梯度累积：对 loss 按累积步数缩放，多次 backward 后等价于大 batch 的梯度
+        scale = 1.0 / self.gradient_accumulation_steps
+        if use_amp and self.scaler is not None:
+            self.scaler.scale(loss * scale).backward()
+        else:
+            (loss * scale).backward()
+
+        self.micro_step += 1
+        if self.micro_step < self.gradient_accumulation_steps:
+            return loss, False
+
+        # 累积满 gradient_accumulation_steps 次后，执行一次参数更新
+        if use_amp and self.scaler is not None:
             self.scaler.unscale_(self.optimizer)
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
             self.scaler.step(self.optimizer)
             self.scaler.update()
         else:
-            loss.backward()  # 普通精度的反向传播
             # 梯度裁剪在混合精度与全精度下保持一致，防止梯度爆炸
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
             self.optimizer.step()  # 更新参数
-
-        return loss
+        self.optimizer.zero_grad(set_to_none=True)
+        self.micro_step = 0
+        return loss, True
 
     def _train_epoch(self, cur_epoch):
         assert self.train_loader and self.eval_loader, f"train_loader and eval_loader can't be empty."
-        # 从中断的数据索引位置继续训练
-        skip_steps = self.step - cur_epoch * self.steps_per_epoch
-        
+        # 从中断的优化器步位置换算回微批索引继续训练（梯度累积下两者相差 accumulation 倍）
+        skip_updates = self.step - cur_epoch * self.updates_per_epoch
+        skip_micro = skip_updates * self.gradient_accumulation_steps
+
         # 每个epoch开始时都重新打乱数据
-        self.train_loader.sampler.set_epoch(cur_epoch) if self.ddp else None  
+        self.train_loader.sampler.set_epoch(cur_epoch) if self.ddp else None
         print(f"{self.cur_time()} start epoch:{cur_epoch} from step:{self.step}") if self.verbose else None
-        
-        for i, batch in enumerate(self.train_loader):  
-            if i < skip_steps: continue
+
+        for i, batch in enumerate(self.train_loader):
+            if i < skip_micro: continue
             X, Y = batch[0].to(self.device), batch[1].to(self.device)
-            attnmask = batch[2].to(self.device) if len(batch) == 3 else None     
+            attnmask = batch[2].to(self.device) if len(batch) == 3 else None
             lr = self._adjust_lr()
-            train_loss = self._train_step(X, Y, attnmask)
+            train_loss, did_update = self._train_step(X, Y, attnmask)
             self._accumulate_training_loss(train_loss)
-            self.step += 1
-            self._check_and_evaluate(lr)
-            self._check_and_save_checkpoint(cur_epoch)
+            # 只有真正完成一次参数更新才推进 step 计数并触发 eval/save
+            if did_update:
+                self.step += 1
+                self._check_and_evaluate(lr)
+                self._check_and_save_checkpoint(cur_epoch)
             
 
     def train(self):
