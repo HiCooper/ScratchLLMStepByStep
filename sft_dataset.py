@@ -57,7 +57,12 @@ def calc_label(input_ids, pad_token_id, tokenizer):
     target_ids = input_ids[1:] + [pad_token_id]
     output_seperator = tokenizer("<|im_start|>assistant\n")['input_ids']
     output_start_index = find_sublist_index(target_ids, output_seperator)
-    instruction_length = output_start_index + len(output_seperator)
+    if output_start_index == -1:
+        # 找不到 assistant 分隔符（例如 chat_template 不一致）时退化为不遮蔽指令部分，
+        # 避免 instruction_length 变成负数导致掩码逻辑错乱。
+        instruction_length = 0
+    else:
+        instruction_length = output_start_index + len(output_seperator)
     label_ids = [-100 if (item == pad_token_id or i < instruction_length) else item for i, item in enumerate(target_ids)]
     return label_ids
 

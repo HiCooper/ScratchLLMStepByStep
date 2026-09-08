@@ -62,7 +62,7 @@ class CausalAttention(nn.Module):
 def apply_rotary_emb(xq, xk, pos_cis):
     def unite_shape(pos_cis, x):
         ndim = x.ndim
-        assert 0 <= 1 < ndim
+        assert ndim >= 2, f"expect x to have at least 2 dims, got {ndim}"
         assert pos_cis.shape == (x.shape[1], x.shape[-1]), f"{pos_cis.shape} == {(x.shape[1], x.shape[-1])} ?"
         shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
         return pos_cis.view(*shape)
