@@ -1,4 +1,16 @@
+"""单卡版训练器（教学用）。
 
+注意：这是「运算加速」一节的中间版本，未包含分布式(DDP)支持。
+多卡训练请使用 trainer.py 中带 DDP 支持的 Trainer。
+"""
+
+import os
+import math
+import time
+import numpy as np
+import torch
+import torch.nn.functional as f
+from contextlib import nullcontext
 
 
 class Trainer:

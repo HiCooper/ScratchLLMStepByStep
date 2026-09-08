@@ -50,10 +50,10 @@ def create_dataloaders_from_texts(texts_data, train_ratio, tokenizer, max_tokens
     train_texts = texts_data[:train_size]
     eval_texts = texts_data[train_size:]
 
-    train_dataset = PretrainDataset(train_texts, tokenizer, max_tokens, max_tokens)
+    train_dataset = PretrainTextDataset(train_texts, tokenizer, max_tokens, max_tokens)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
-    eval_dataset = PretrainDataset(eval_texts, tokenizer, max_tokens, max_tokens)
+    eval_dataset = PretrainTextDataset(eval_texts, tokenizer, max_tokens, max_tokens)
     eval_loader = DataLoader(eval_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
     return train_loader, eval_loader
@@ -91,7 +91,8 @@ def texts_to_bin(input_path, output_path, tokenizer, content_key="content"):
 
 class PretrainBinaryDataset(Dataset):
     def __init__(self, data_path, max_tokens):
-        with open(data_path) as f:
+        # 二进制文件必须以 rb 打开，文本模式下 seek/tell 计算字节数不可靠
+        with open(data_path, 'rb') as f:
             f.seek(0, 2)
             self.total_tokens = f.tell() // np.dtype("uint16").itemsize
             print(f"total_tokens: {self.total_tokens}")
