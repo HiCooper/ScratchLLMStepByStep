@@ -91,6 +91,7 @@ bash scripts/download_data.sh
 │   ├── download_data.sh       # 从 ModelScope 下载 pretrain_t2t_mini.jsonl
 │   ├── train_tokenizer.py     # 训练 BPE 分词器（对应 notebook 01，支持 --max-lines 子集）
 │   ├── validate_pretrain.py   # 单卡端到端预训练验证（对应 notebook 09/10）
+│   ├── validate_ddp.py        # DDP 链路验证（nproc=1 单卡可跑，nproc=2 需真多卡）
 │   └── pretrain_start.sh      # torchrun DDP 多卡启动
 └── img/                       # 图片素材
 ```

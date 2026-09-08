@@ -78,15 +78,11 @@ def main():
     trainer.train()
     print(f"train use time: {(time.time()-start)/60:.2f}min")
 
-    # 训练完测试生成
-    input_text = "秋天来了，"
-    inputs = torch.tensor([tokenizer.encode(input_text)]).to("cuda")
-    model = trainer.model
-    model.eval()
-    with torch.no_grad():
-        response_ids = model.generate(inputs, max_length=60, eos_token_id=tokenizer.eos_token_id, use_kv_cache=True)
-    generated = tokenizer.decode(response_ids.squeeze(0), skip_special_tokens=False)
-    print(f"\n[生成测试] 输入: {input_text}\n[生成测试] 输出: {generated}")
+    # 训练完测试生成（trainer.predict 内部会解包 DDP，单卡/多卡均可）
+    if trainer.is_main_process:
+        input_text = "秋天来了，"
+        generated = trainer.predict(tokenizer, input_text, max_length=60)
+        print(f"\n[生成测试] 输入: {input_text}\n[生成测试] 输出: {generated}")
 
 
 if __name__ == "__main__":
