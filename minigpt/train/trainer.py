@@ -44,6 +44,7 @@ class Trainer:
         self.step = 0
         self.total_steps = 0
         self.train_loss_acc = 0
+        self.last_grad_norm = 0.0
         self.ddp = False
         self.rank = -1
         self.local_rank = -1
@@ -205,7 +206,7 @@ class Trainer:
             # 梯度累积下，每个 step 之间会累积多个 micro-batch 的 loss，故分母要乘累积步数
             train_loss = self.train_loss_acc / (self.eval_steps * self.gradient_accumulation_steps)
             eval_loss = self._evaluate()
-            grad_norm = self._calc_grad_norm()
+            grad_norm = self.last_grad_norm
             self._record_metrics(train_loss, eval_loss, grad_norm, lr)
             self.train_loss_acc = 0
 
@@ -281,13 +282,16 @@ class Trainer:
             return loss, False
 
         # 累积满 gradient_accumulation_steps 次后，执行一次参数更新
+        # 梯度范数必须在 optimizer.step / zero_grad 之前计算，否则梯度已被清零、恒为 0
         if use_amp and self.scaler is not None:
             self.scaler.unscale_(self.optimizer)
+            self.last_grad_norm = self._calc_grad_norm()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
             self.scaler.step(self.optimizer)
             self.scaler.update()
         else:
             # 梯度裁剪在混合精度与全精度下保持一致，防止梯度爆炸
+            self.last_grad_norm = self._calc_grad_norm()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
             self.optimizer.step()  # 更新参数
         self.optimizer.zero_grad(set_to_none=True)
