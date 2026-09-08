@@ -263,17 +263,19 @@ class Trainer:
             logits = self.model(X, attention_mask=attnmask)
             loss = f.cross_entropy(logits.flatten(0, 1), Y.flatten())
     
-        if enable_mixed_precision:  # 检查是否使用混合精度  
-            self.scaler.scale(loss).backward()  
-            self.scaler.unscale_(self.optimizer)  
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)  
-            self.scaler.step(self.optimizer)  
-            self.scaler.update()  
-        else:  
-            loss.backward()  # 普通精度的反向传播  
-            self.optimizer.step()  # 更新参数  
+        if enable_mixed_precision:  # 检查是否使用混合精度
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            loss.backward()  # 普通精度的反向传播
+            # 梯度裁剪在混合精度与全精度下保持一致，防止梯度爆炸
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            self.optimizer.step()  # 更新参数
 
-        return loss 
+        return loss
 
     def _train_epoch(self, cur_epoch):
         assert self.train_loader and self.eval_loader, f"train_loader and eval_loader can't be empty."

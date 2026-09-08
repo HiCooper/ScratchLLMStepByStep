@@ -134,7 +134,6 @@ class MiniGPT(PreTrainedModel):
         self.register_buffer("pos_cis", pos_cis, persistent=False)
         self.final_norm = LayerNorm(config.emb_dim)
         self.out_head = nn.Linear(config.emb_dim, config.vocab_size)
-        self.out = CausalLMOutputWithPast()
 
     def forward(self,
                 inputs:Optional[torch.Tensor]=None,
@@ -184,9 +183,8 @@ class MiniGPT(PreTrainedModel):
         if not return_dict:
             return logits
 
-        self.out.__setitem__('logits', logits)
-        self.out.__setitem__('past_kvs', past_kvs)
-        return self.out
+        # 每次前向都新建输出对象，避免复用可变单例导致的隐式状态共享
+        return CausalLMOutputWithPast(logits=logits, past_key_values=past_kvs)
  
     @torch.inference_mode()
     def generate(self, input_ids, max_length=512, eos_token_id=-1, **kwargs):
@@ -205,7 +203,7 @@ class MiniGPT(PreTrainedModel):
                 step_input = input_ids[:, -self.context_length:]
             output = self(step_input, attention_mask=attention_mask, use_kv_cache=use_kv_cache,
                           past_kvs=past_kvs, return_dict=True, **kwargs)  # shape: batch, n_tokens, vocab_size
-            past_kvs = output["past_kvs"] if use_kv_cache else None
+            past_kvs = output["past_key_values"] if use_kv_cache else None
             # 只取每个序列最后一个token的输出向量作为logits, shape变为: batch, vocab_size
             logits = output["logits"][:, -1, :]
             # 使用softmax函数将logits转换为下一个token的概率分布，shape仍是: batch, vocab_size
