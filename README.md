@@ -14,21 +14,21 @@
 
 ## 💥 章节结构
 
-- [带你从零训练tokenizer](./01_分词器训练.ipynb)
-- [词嵌入和位置嵌入](./02_模型结构之词嵌入和位置编码.ipynb)
-- [从零认识自注意力](./03_模型结构之自注意力.ipynb)
-- [实现因果注意力机制](./04_模型结构之因果注意力.ipynb)
-- [实现多头注意力](./05_模型结构之多头注意力.ipynb)
-- [构建TransformerBlock](./06_模型结构之TransformerBlock.ipynb)
-- [构建MiniGPT](./07_模型结构之MiniGPT.ipynb)
-- [预训练之高效数据加载](./08_预训练之高效数据加载.ipynb)
-- [预训练之从零起步](./09_预训练之从零起步.ipynb)
-- [预训练之运算加速](./10_预训练之运算加速.ipynb)
-- [预训练之多卡并行](./11_预训练之多卡并行.ipynb)
-- [SFT之分类微调](./12_SFT之分类微调.ipynb)
-- [SFT指令微调之数据处理](./13_SFT指令微调之数据处理.ipynb)
-- [SFT之指令微调训练](./14_SFT指令微调之训练.ipynb)
-- [模型推理之选词算法](./15_模型推理之选词算法.ipynb)
+- [带你从零训练tokenizer](./notebooks/01_分词器训练.ipynb)
+- [词嵌入和位置嵌入](./notebooks/02_模型结构之词嵌入和位置编码.ipynb)
+- [从零认识自注意力](./notebooks/03_模型结构之自注意力.ipynb)
+- [实现因果注意力机制](./notebooks/04_模型结构之因果注意力.ipynb)
+- [实现多头注意力](./notebooks/05_模型结构之多头注意力.ipynb)
+- [构建TransformerBlock](./notebooks/06_模型结构之TransformerBlock.ipynb)
+- [构建MiniGPT](./notebooks/07_模型结构之MiniGPT.ipynb)
+- [预训练之高效数据加载](./notebooks/08_预训练之高效数据加载.ipynb)
+- [预训练之从零起步](./notebooks/09_预训练之从零起步.ipynb)
+- [预训练之运算加速](./notebooks/10_预训练之运算加速.ipynb)
+- [预训练之多卡并行](./notebooks/11_预训练之多卡并行.ipynb)
+- [SFT之分类微调](./notebooks/12_SFT之分类微调.ipynb)
+- [SFT指令微调之数据处理](./notebooks/13_SFT指令微调之数据处理.ipynb)
+- [SFT之指令微调训练](./notebooks/14_SFT指令微调之训练.ipynb)
+- [模型推理之选词算法](./notebooks/15_模型推理之选词算法.ipynb)
 
 ## 💥 数据集
 相关训练所需数据集的下载地址。
@@ -55,22 +55,26 @@
 
 ## 💥 目录结构
 
-可复用的代码已整理为 `minigpt` 包，notebook 通过 `%run minigpt/...` 引用：
+```
+├── notebooks/                 # 15 个课程 notebook，01_~15_ 前缀按课程顺序排序
+├── minigpt/                   # 可复用代码包，notebook 通过 %run minigpt/... 引用
+│   ├── config.py              # 集中管理超参与路径（运行前改这里）
+│   ├── model/
+│   │   ├── attention.py       # 自注意力/多头注意力/FlashAttention/RoPE
+│   │   └── transformer.py     # LayerNorm/FFN/TransformerBlock/GPTConfig/MiniGPT
+│   ├── data/
+│   │   ├── pretrain_dataset.py # 预训练二进制数据集(np.memmap)
+│   │   └── sft_dataset.py     # SFT 指令数据集/损失掩码
+│   └── train/
+│       ├── trainer.py         # 训练器(单卡/DDP、混合精度、梯度累积)
+│       ├── pretrainer.py      # 预训练入口(DDP)
+│       └── pretrainer_single.py # 单卡教学版训练器
+├── scripts/                   # 启动脚本(pretrain_start.sh)
+└── img/                       # 图片素材
+```
 
-```
-minigpt/
-├── config.py                  # 集中管理超参与路径（运行前改这里）
-├── model/
-│   ├── attention.py           # 自注意力/多头注意力/FlashAttention/RoPE
-│   └── transformer.py         # LayerNorm/FFN/TransformerBlock/GPTConfig/MiniGPT
-├── data/
-│   ├── pretrain_dataset.py    # 预训练二进制数据集(np.memmap)
-│   └── sft_dataset.py         # SFT 指令数据集/损失掩码
-└── train/
-    ├── trainer.py             # 训练器(单卡/DDP、混合精度、梯度累积)
-    ├── pretrainer.py          # 预训练入口(DDP)
-    └── pretrainer_single.py   # 单卡教学版训练器
-```
+> 涉及 `minigpt` 包的 notebook 开头都有一个「设置」单元格，会自动切到项目根目录，
+> 因此无论从哪个目录启动 Jupyter，`%run minigpt/...` 都能正常找到代码。
 
 ## 💥 工程化说明
 
