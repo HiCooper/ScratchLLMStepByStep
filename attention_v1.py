@@ -196,10 +196,8 @@ class FlashMultiHeadAttention(MultiHeadAttention):
             k, v = k_new, v_new
         past_kv = (k, v)
 
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
+        # flash_attn_func 的输入/输出均为 (batch, seqlen, nheads, headdim)，无需转置到 head-first，
+        # 这与非 flash 的 MultiHeadAttention（需要 transpose 后做批量 matmul）不同。
         input_dtype = q.dtype
         if input_dtype == torch.float32:
             if torch.is_autocast_enabled():
@@ -219,8 +217,6 @@ class FlashMultiHeadAttention(MultiHeadAttention):
         context_vecs = flash_attn_func(q, k, v, dropout_p=dropout_rate, softmax_scale=self.head_dim ** -0.5, causal=causal)
         context_vecs = context_vecs.to(dtype=input_dtype)
 
-        context_vecs = context_vecs.transpose(1, 2)  # shape: b, num_tokens, num_heads, head_dim
-        context_vecs = context_vecs.contiguous().view(b, num_tokens, self.dim_out)
-        output = self.Wo(context_vecs)
+        output = self.Wo(context_vecs.contiguous().view(b, num_tokens, self.dim_out))
 
         return output, past_kv
