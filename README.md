@@ -87,12 +87,20 @@ bash scripts/download_data.sh
 │       ├── trainer.py         # 训练器(单卡/DDP、混合精度、梯度累积)
 │       ├── pretrainer.py      # 预训练入口(DDP)
 │       └── pretrainer_single.py # 单卡教学版训练器
-├── scripts/                   # 下载数据 / 训练分词器 / 单卡预训练验证 / DDP 启动
+├── scripts/                   # 下载数据 / 训练分词器 / 验证 / 环境检查 / 启动
 │   ├── download_data.sh       # 从 ModelScope 下载 pretrain_t2t_mini.jsonl
 │   ├── train_tokenizer.py     # 训练 BPE 分词器（对应 notebook 01，支持 --max-lines 子集）
 │   ├── validate_pretrain.py   # 单卡端到端预训练验证（对应 notebook 09/10）
 │   ├── validate_ddp.py        # DDP 链路验证（nproc=1 单卡可跑，nproc=2 需真多卡）
+│   ├── check_env.py           # 打印环境信息(Python/PyTorch/CUDA/GPU/CPU/包版本)
 │   └── pretrain_start.sh      # torchrun DDP 多卡启动
+├── tests/                     # 单元测试(pytest，CPU 即可运行)
+│   ├── conftest.py            # 共享 fixture(小模型/迷你分词器)
+│   ├── test_attention.py      # 因果掩码/RoPE/padding 掩码/flash-attn 一致性
+│   ├── test_transformer.py    # GPTConfig/MiniGPT 前向/pos_cis 扩展/生成
+│   ├── test_data.py           # texts_to_bin/二进制数据集/数据集划分
+│   ├── test_trainer.py        # 梯度范数/梯度累积
+│   └── test_tokenizer.py      # 分词器编解码 round-trip/特殊 token
 └── img/                       # 图片素材
 ```
 
@@ -118,6 +126,23 @@ bash scripts/download_data.sh
 > 注意：开启 `use_swiglu`/`qkv_merged`/`tie_word_embeddings` 会改变模型结构，与旧版（GELU/独立 QKV/不共享权重）训练出的 checkpoint 不兼容；加载旧 checkpoint 请保持这些开关关闭。
 
 > ⚠️ FlashAttention 硬件约束：`flash_attn=True` 依赖 flash-attn 库的 FlashAttention-2 内核，**只支持 Ampere（sm_80）及以上 GPU**（如 A100、RTX 30/40/50 系列）。旧卡（如 Turing 的 RTX 2060/1660、Pascal/V100 等）无法运行，会直接报错；这类显卡请保持 `flash_attn=False` 走标准注意力实现。
+
+## 💥 测试
+
+**单元测试**（`tests/`，CPU 即可运行，无需数据与 GPU）：
+
+```bash
+pip install pytest
+PYTHONPATH=. pytest tests/ -q
+```
+
+覆盖注意力、模型结构、数据、训练器、分词器等核心逻辑，作为后续迭代的回归测试。
+
+**端到端验证**（需 GPU + 数据，非单元测试）：
+- `scripts/validate_pretrain.py`：单卡端到端预训练验证
+- `scripts/validate_ddp.py`：DDP 链路验证（`nproc=1` 单卡可跑，`nproc=2` 需真多卡）
+
+**环境检查**：`python scripts/check_env.py` 打印 Python/PyTorch/CUDA/GPU/CPU/内存及主要包版本，便于排查硬件/环境问题。
 
 ## 💥 如何开始？
 1. 克隆本项目到本地：

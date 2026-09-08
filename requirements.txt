@@ -8,6 +8,7 @@ numpy>=1.24.0
 # flash-attn>=2.5.0
 
 # 可选：开发 / 调试
+pytest>=7.0          # 运行 tests/ 单元测试
 # tensorboard
 # matplotlib
 # pandas
