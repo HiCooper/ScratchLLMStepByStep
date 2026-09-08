@@ -213,14 +213,14 @@ class Trainer:
         
         for batch in self.eval_loader:
             X, Y = batch[0].to(self.device), batch[1].to(self.device)
-            attnmask = batch[2].to(self.device) if len(batch) == 3 else None  
+            attnmask = batch[2].to(self.device) if len(batch) == 3 else None
             with torch.no_grad():
-                logits = model(X)
+                logits = model(X, attention_mask=attnmask)
             loss = f.cross_entropy(logits.flatten(0, 1), Y.flatten())
             total_loss += loss.item()
-        
+
         model.train()
-        return total_loss/num_batches  
+        return total_loss/num_batches
 
     def test(self, dataset):
         """用于对训练的模型进行评估测试"""
@@ -232,9 +232,9 @@ class Trainer:
         
         for batch in dataloader:
             X, Y = batch[0].to(self.device), batch[1].to(self.device)
-            attnmask = batch[2].to(self.device) if len(batch) == 3 else None  
+            attnmask = batch[2].to(self.device) if len(batch) == 3 else None
             with torch.no_grad():
-                logits = model(X)
+                logits = model(X, attention_mask=attnmask)
             loss = f.cross_entropy(logits.flatten(0, 1), Y.flatten())
             total_loss += loss.item()
         
@@ -258,9 +258,9 @@ class Trainer:
         enable_mixed_precision = X.device.type == "cuda" and self.scaler is not None
         ctx = (torch.amp.autocast('cuda') if enable_mixed_precision else nullcontext())  
         
-        self.optimizer.zero_grad(set_to_none=True)  
-        with ctx:  
-            logits = self.model(X)  
+        self.optimizer.zero_grad(set_to_none=True)
+        with ctx:
+            logits = self.model(X, attention_mask=attnmask)
             loss = f.cross_entropy(logits.flatten(0, 1), Y.flatten())
     
         if enable_mixed_precision:  # 检查是否使用混合精度  

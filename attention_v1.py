@@ -1,7 +1,12 @@
 import torch
 from torch import nn
 from typing import Tuple, List
-from flash_attn import flash_attn_func
+
+# flash-attn 是可选依赖：只有使用 FlashMultiHeadAttention 时才需要，未安装时模块仍可正常导入。
+try:
+    from flash_attn import flash_attn_func
+except ImportError:
+    flash_attn_func = None
 
 
 inputs = torch.tensor(
@@ -81,8 +86,11 @@ class MultiHeadAttention(nn.Module):
         self.Wv = nn.Linear(dim_in, dim_out, bias=qkv_bias)
         self.Wo = nn.Linear(dim_out, dim_out)
         self.dropout = nn.Dropout(dropout_rate)
-        
-        self.register_buffer("mask", torch.triu(torch.ones(context_length, context_length), diagonal=1))
+
+        # 加法掩码形式的因果掩码：上三角(未来位置)为 -inf，下三角(含对角线)为 0。
+        # 直接与注意力得分相加即可完成因果遮蔽，避免在 (b, heads, seq, seq) 上做 masked_fill。
+        self.register_buffer("causal_mask", torch.triu(
+            torch.full((context_length, context_length), float("-inf")), diagonal=1))
 
     def forward(self, x, pos_cis, attention_mask=None, use_kv_cache=False, past_kv:Tuple[torch.Tensor]=None):
         # 输入形状
@@ -116,14 +124,17 @@ class MultiHeadAttention(nn.Module):
         v = v.transpose(1, 2)
 
         # 计算注意力分数，形状变为: b, num_heads, num_tokens, num_tokens
-        atten_scores = q @ k.transpose(2, 3)   
-        atten_scores.masked_fill_(self.mask.bool()[:num_tokens, :num_tokens], -torch.inf)
-        scaled_atten_scores = atten_scores/k.shape[-1]**0.5
+        atten_scores = q @ k.transpose(2, 3)
+        scaled_atten_scores = atten_scores / k.shape[-1] ** 0.5
 
-        # 注意力掩码运算
+        # 加法掩码：把因果掩码与 padding 掩码合并成一份偏置，一次性加到得分上。
+        # 相比 masked_fill，避免了在 (b, heads, seq, seq) 得分矩阵上的原地索引填充，更高效、更易融合。
+        additive_mask = self.causal_mask[:num_tokens, :num_tokens].to(scaled_atten_scores.dtype)
         if attention_mask is not None:
-            # filled the padding with -inf
-            scaled_atten_scores = scaled_atten_scores.masked_fill(attention_mask==0, -torch.inf)
+            # attention_mask: (batch, 1, 1, seq_len)，1=有效、0=填充。填充位置置为最小有限值(~-inf)
+            pad_bias = (attention_mask == 0).to(scaled_atten_scores.dtype) * torch.finfo(scaled_atten_scores.dtype).min
+            additive_mask = additive_mask + pad_bias
+        scaled_atten_scores = scaled_atten_scores + additive_mask
 
         atten_weights = torch.softmax(scaled_atten_scores, dim=-1)
         atten_weights = self.dropout(atten_weights)
@@ -185,6 +196,8 @@ class FlashMultiHeadAttention(MultiHeadAttention):
             v = v.to(dtype=target_dtype)
 
         dropout_rate = self.dropout.p if self.training else 0.0
+        if flash_attn_func is None:
+            raise ImportError("使用 FlashMultiHeadAttention 需要安装 flash-attn 包。")
         context_vecs = flash_attn_func(q, k, v, dropout_p=dropout_rate, softmax_scale=self.head_dim ** -0.5, causal=True)
         context_vecs = context_vecs.to(dtype=input_dtype)
         

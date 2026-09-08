@@ -87,14 +87,12 @@ def precompute_pos_cis(dim: int, end: int, theta: float = 10000.0):
     pos_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
     return pos_cis
 
-def attention_mask_to_4d(attention_mask, num_heads):
-    batch_size, seq_len = attention_mask.size()
-    # expand dimensions to (batch, 1, 1, seq_len)
-    attention_mask = attention_mask.unsqueeze(1).unsqueeze(2)
-    # repleat to match (batch, 1, seq_len, seq_len)
-    attention_mask = attention_mask.repeat(1, num_heads, seq_len, 1)
-    # invert the attention mask，where the position of value 1 will be masked with -inf
-    return (1 - attention_mask)
+def attention_mask_to_additive(attention_mask):
+    """将 (batch, seq_len) 的注意力掩码(1=有效, 0=填充)扩展成 (batch, 1, 1, seq_len)。
+
+    这里只做维度扩展，真正的加法偏置在注意力内部按得分 dtype 生成，避免 dtype 不匹配。
+    """
+    return attention_mask.unsqueeze(1).unsqueeze(2)
         
 class GPTConfig(PretrainedConfig):
     # 每个模型都必须有一个独特的model_type，否则会报"Should have a `model_type` key in its config.json"
@@ -156,11 +154,11 @@ class MiniGPT(PreTrainedModel):
         x = self.token_emb(inputs)
         x = self.drop_emb(x)
         
-        # 支持注意力掩码计算
-        if attention_mask != None:
+        # 支持注意力掩码计算（1=有效，0=填充）
+        if attention_mask is not None:
             assert isinstance(attention_mask, torch.Tensor), f"expect torch.Tensor, but got{type(attention_mask)}"
             assert attention_mask.size() == inputs.size(), f"size of inputs {inputs.size()} and attention_mask {attention_mask.size()} must be the same."
-            attention_mask = attention_mask_to_4d(attention_mask, self.num_heads)
+            attention_mask = attention_mask_to_additive(attention_mask)
 
         for i, block in enumerate(self.decode_layers):
             x, past_kvs[i] = block(x, pos_cis, attention_mask, use_kv_cache, past_kvs[i])
