@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-import importlib  
+import torch.nn.functional as F
+import importlib
 import attention_v1
 # 使用 importlib.reload 来重新加载该模块  
 importlib.reload(attention_v1) 
@@ -17,7 +18,11 @@ MODEL_CONFIG = {
     "n_heads": 12, # Number of attention heads
     "n_layers": 12, # Number of layers
     "drop_rate": 0.1, # Dropout rate
-    "qkv_bias": False # Query-Key-Value bias
+    "qkv_bias": False, # Query-Key-Value bias
+    "use_swiglu": True, # 使用 SwiGLU 前馈（现代 LLM 默认）
+    "qkv_merged": True, # 使用合并的 QKV 投影（单个 Linear 出 3*dim_out）
+    "tie_word_embeddings": True, # 词嵌入与输出头共享权重
+    "use_checkpoint": False, # 激活重计算（省显存，训练用）
 }
 
 class LayerNorm(nn.Module):
@@ -35,32 +40,46 @@ class LayerNorm(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, emb_dim:int):
+    def __init__(self, emb_dim:int, use_swiglu:bool=False):
         super().__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(emb_dim, 4 * emb_dim),
-            nn.GELU(),
-            nn.Linear(4 * emb_dim, emb_dim),
-        )
+        self.use_swiglu = use_swiglu
+        if use_swiglu:
+            # SwiGLU：gate 分支与 up 分支逐元素相乘，再 down 投影。
+            # 现代 LLM(LLaMA/Mistral/Qwen)普遍采用；无 bias 与 qkv_bias=False 保持一致。
+            hidden_dim = 4 * emb_dim
+            self.gate_proj = nn.Linear(emb_dim, hidden_dim, bias=False)
+            self.up_proj = nn.Linear(emb_dim, hidden_dim, bias=False)
+            self.down_proj = nn.Linear(hidden_dim, emb_dim, bias=False)
+        else:
+            self.layers = nn.Sequential(
+                nn.Linear(emb_dim, 4 * emb_dim),
+                nn.GELU(),
+                nn.Linear(4 * emb_dim, emb_dim),
+            )
+
     def forward(self, x):
+        if self.use_swiglu:
+            return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
         return self.layers(x)
     
 class TransformerBlock(nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
-        attn_kwargs = {  
-            'dim_in': kwargs['emb_dim'],  
-            'dim_out': kwargs['emb_dim'],  
-            'context_length': kwargs['context_length'],  
-            'num_heads': kwargs['n_heads'],  
-            'dropout_rate': kwargs['drop_rate'],  
-            'qkv_bias': kwargs['qkv_bias']  
-        }  
+        attn_kwargs = {
+            'dim_in': kwargs['emb_dim'],
+            'dim_out': kwargs['emb_dim'],
+            'context_length': kwargs['context_length'],
+            'num_heads': kwargs['n_heads'],
+            'dropout_rate': kwargs['drop_rate'],
+            'qkv_bias': kwargs['qkv_bias'],
+            'qkv_merged': kwargs.get('qkv_merged', False),
+        }
         if kwargs.get('flash_attn'):
             self.atten = FlashMultiHeadAttention(**attn_kwargs)
         else:
             self.atten = MultiHeadAttention(**attn_kwargs)
-        self.ffn = FeedForward(kwargs['emb_dim'])
+        self.ffn = FeedForward(kwargs['emb_dim'], use_swiglu=kwargs.get('use_swiglu', False))
+        self.use_checkpoint = kwargs.get('use_checkpoint', False)
         self.drop = nn.Dropout(kwargs['drop_rate'])
         self.layernorm1 = LayerNorm(kwargs['emb_dim'])
         self.layernorm2 = LayerNorm(kwargs['emb_dim'])
@@ -74,7 +93,11 @@ class TransformerBlock(nn.Module):
 
         shortcut = x
         x = self.layernorm2(x)
-        x = self.ffn(x)
+        # 激活重计算：训练时对 FFN 用 checkpoint 以省显存，推理/无梯度时直通
+        if self.use_checkpoint and x.requires_grad:
+            x = torch.utils.checkpoint.checkpoint(self.ffn, x, use_reentrant=False)
+        else:
+            x = self.ffn(x)
         x = self.drop(x)
         x = x + shortcut
 
@@ -107,6 +130,11 @@ class GPTConfig(PretrainedConfig):
         self.n_heads = kwargs.get('n_heads', 12)
         self.qkv_bias = kwargs.get('qkv_bias', False)
         self.flash_attn = kwargs.get('flash_attn', False)
+        # 前沿架构开关（默认关闭以兼容旧 checkpoint，开启即前沿配置）
+        self.use_swiglu = kwargs.get('use_swiglu', False)
+        self.qkv_merged = kwargs.get('qkv_merged', False)
+        self.tie_word_embeddings = kwargs.get('tie_word_embeddings', False)
+        self.use_checkpoint = kwargs.get('use_checkpoint', False)
         super().__init__(**kwargs)
 
 class MiniGPT(PreTrainedModel):
@@ -134,6 +162,9 @@ class MiniGPT(PreTrainedModel):
         self.register_buffer("pos_cis", pos_cis, persistent=False)
         self.final_norm = LayerNorm(config.emb_dim)
         self.out_head = nn.Linear(config.emb_dim, config.vocab_size)
+        if config.tie_word_embeddings:
+            # 权重共享：输入嵌入与输出头共用同一份权重，显著减少参数量（输出头偏置仍独立）
+            self.out_head.weight = self.token_emb.weight
 
     def forward(self,
                 inputs:Optional[torch.Tensor]=None,

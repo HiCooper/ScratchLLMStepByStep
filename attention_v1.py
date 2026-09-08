@@ -75,15 +75,20 @@ def apply_rotary_emb(xq, xk, pos_cis):
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, dim_in, dim_out, context_length, dropout_rate, num_heads, qkv_bias=False):
+    def __init__(self, dim_in, dim_out, context_length, dropout_rate, num_heads, qkv_bias=False, qkv_merged=False):
         super().__init__()
         assert dim_out % num_heads == 0, "dim_out must be divisible by num_heads"
         self.dim_out = dim_out
         self.num_heads = num_heads
         self.head_dim = dim_out // num_heads   # 每个头的维度
-        self.Wq = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.Wk = nn.Linear(dim_in, dim_out, bias=qkv_bias)
-        self.Wv = nn.Linear(dim_in, dim_out, bias=qkv_bias)
+        self.qkv_merged = qkv_merged
+        if qkv_merged:
+            # 合并 QKV 投影：单次矩阵乘法产出 3*dim_out，比三个独立 Linear 更高效
+            self.Wqkv = nn.Linear(dim_in, 3 * dim_out, bias=qkv_bias)
+        else:
+            self.Wq = nn.Linear(dim_in, dim_out, bias=qkv_bias)
+            self.Wk = nn.Linear(dim_in, dim_out, bias=qkv_bias)
+            self.Wv = nn.Linear(dim_in, dim_out, bias=qkv_bias)
         self.Wo = nn.Linear(dim_out, dim_out)
         self.dropout = nn.Dropout(dropout_rate)
 
@@ -91,6 +96,12 @@ class MultiHeadAttention(nn.Module):
         # 直接与注意力得分相加即可完成因果遮蔽，避免在 (b, heads, seq, seq) 上做 masked_fill。
         self.register_buffer("causal_mask", torch.triu(
             torch.full((context_length, context_length), float("-inf")), diagonal=1))
+
+    def _project_qkv(self, x):
+        if self.qkv_merged:
+            q, k, v = self.Wqkv(x).chunk(3, dim=-1)
+            return q, k, v
+        return self.Wq(x), self.Wk(x), self.Wv(x)
 
     def forward(self, x, pos_cis, attention_mask=None, use_kv_cache=False, past_kv:Tuple[torch.Tensor]=None):
         # 输入形状：训练/首次前向为 (b, seq_len, dim)，增量推理时为 (b, 1, dim)
@@ -103,9 +114,7 @@ class MultiHeadAttention(nn.Module):
         else:
             past_k, past_v = None, None
 
-        q = self.Wq(x)            # (b, num_tokens, dim_out)
-        k_new = self.Wk(x)
-        v_new = self.Wv(x)
+        q, k_new, v_new = self._project_qkv(x)   # 每个 (b, num_tokens, dim_out)
 
         # 变换形状，将最后一维拆成多头，每个头有 head_dim 维，矩阵形状由三维变为四维。
         q = q.view(b, num_tokens, self.num_heads, self.head_dim)
@@ -172,9 +181,7 @@ class FlashMultiHeadAttention(MultiHeadAttention):
         else:
             past_k, past_v = None, None
 
-        q = self.Wq(x)
-        k_new = self.Wk(x)
-        v_new = self.Wv(x)
+        q, k_new, v_new = self._project_qkv(x)
 
         q = q.view(b, num_tokens, self.num_heads, self.head_dim)
         k_new = k_new.view(b, num_tokens, self.num_heads, self.head_dim)
