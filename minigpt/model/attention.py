@@ -149,7 +149,15 @@ class MultiHeadAttention(nn.Module):
         # 与 padding 掩码合并成一份偏置，一次性加到得分上，避免 masked_fill。
         additive_mask = None
         if not use_kv_cache:
-            additive_mask = self.causal_mask[:num_queries, :num_keys].to(scaled_atten_scores.dtype)
+            # 序列长度通常 = context_length，直接用预计算 buffer；超出时(长 prompt 全量前向)动态生成，
+            # 否则因果掩码尺寸与 pos_cis 不一致，会在加分处报 shape 不匹配。
+            if num_queries <= self.causal_mask.shape[0]:
+                additive_mask = self.causal_mask[:num_queries, :num_keys].to(scaled_atten_scores.dtype)
+            else:
+                additive_mask = torch.triu(
+                    torch.full((num_queries, num_keys), float("-inf"), device=scaled_atten_scores.device),
+                    diagonal=1,
+                ).to(scaled_atten_scores.dtype)
         if attention_mask is not None:
             # attention_mask: (batch, 1, 1, num_keys)，1=有效、0=填充
             pad_bias = (attention_mask == 0).to(scaled_atten_scores.dtype) * torch.finfo(scaled_atten_scores.dtype).min
