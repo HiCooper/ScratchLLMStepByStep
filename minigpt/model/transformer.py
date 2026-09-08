@@ -7,20 +7,6 @@ from transformers import PreTrainedModel, PretrainedConfig, AutoTokenizer
 from minigpt.model.attention import MultiHeadAttention, FlashMultiHeadAttention
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-MODEL_CONFIG = {
-    "vocab_size": 32000, # Vocabulary size
-    "context_length": 1024, # Context length
-    "emb_dim": 768, # Embedding dimension
-    "n_heads": 12, # Number of attention heads
-    "n_layers": 12, # Number of layers
-    "drop_rate": 0.1, # Dropout rate
-    "qkv_bias": False, # Query-Key-Value bias
-    "use_swiglu": True, # 使用 SwiGLU 前馈（现代 LLM 默认）
-    "qkv_merged": True, # 使用合并的 QKV 投影（单个 Linear 出 3*dim_out）
-    "tie_word_embeddings": True, # 词嵌入与输出头共享权重
-    "use_checkpoint": False, # 激活重计算（省显存，训练用）
-}
-
 class LayerNorm(nn.Module):
     def __init__(self, emb_dim):
         super().__init__()
