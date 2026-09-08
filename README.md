@@ -31,10 +31,28 @@
 - [模型推理之选词算法](./notebooks/15_模型推理之选词算法.ipynb)
 
 ## 💥 数据集
-相关训练所需数据集的下载地址。
-- [分词器训练数据集](https://huggingface.co/datasets/jingyaogong/minimind_dataset/tree/main)
-- [预训练数据集](http://share.mobvoi.com:5000/sharing/O91blwPkY)
-- [SFT数据集](https://www.modelscope.cn/datasets/deepctrl/deepctrl-sft-data/resolve/master/sft_data_zh.jsonl)
+
+训练所需数据统一从 **ModelScope（魔搭）** 下载（国内可直连，避免 HuggingFace 网络问题）。本教程的分词器训练与预训练共用同一个文件 [`gongjy/minimind_dataset`](https://www.modelscope.cn/datasets/gongjy/minimind_dataset)（即 HuggingFace `jingyaogong/minimind_dataset` 的镜像）里的 `pretrain_t2t_mini.jsonl`：
+
+| 用途 | 文件 | 大小 | 说明 |
+|---|---|---|---|
+| 分词器训练 + 预训练 | `pretrain_t2t_mini.jsonl` | ~1.2GB | 中英混合文本，每行 `{"text": "..."}`（替代原 33GB 的 mobvoi 通用语料） |
+| SFT | `sft_data_zh.jsonl` | — | 见下方链接 |
+
+**一键下载**（下载到 `dataset/`）：
+
+```bash
+bash scripts/download_data.sh
+```
+
+手动下载（三选一）：
+- 网页：打开 [gongjy/minimind_dataset 文件列表](https://www.modelscope.cn/datasets/gongjy/minimind_dataset/files)，点击文件右侧「下载」按钮
+- 命令行：`pip install modelscope && modelscope download --dataset gongjy/minimind_dataset pretrain_t2t_mini.jsonl`
+- [SFT 数据集](https://www.modelscope.cn/datasets/deepctrl/deepctrl-sft-data/resolve/master/sft_data_zh.jsonl)
+
+> 说明：原预训练数据 mobvoi 通用语料高达 33GB，体积大且难以获取；现改用同源的 `pretrain_t2t_mini.jsonl`（~1.2GB），其 `text` 字段格式与教程代码完全一致，`texts_to_bin` 时仍用 `content_key="text"`，无需改动任何代码逻辑。
+
+> ⚠️ 分词器训练的注意点：`pretrain_t2t_mini.jsonl` 是**长段落**文本，字节级 BPE 预分词会把整段中文当成一个超长「词」，导致训练内存暴涨（全量 1.2GB 在 16GB 内存的机器上会 OOM）。分词器训练只需有代表性的语料子集即可，推荐用 `scripts/train_tokenizer.py --max-lines 150000`（约 150MB）训练，避免内存爆炸。
 
 ## 💥 运行环境
 
@@ -69,7 +87,11 @@
 │       ├── trainer.py         # 训练器(单卡/DDP、混合精度、梯度累积)
 │       ├── pretrainer.py      # 预训练入口(DDP)
 │       └── pretrainer_single.py # 单卡教学版训练器
-├── scripts/                   # 启动脚本(pretrain_start.sh)
+├── scripts/                   # 下载数据 / 训练分词器 / 单卡预训练验证 / DDP 启动
+│   ├── download_data.sh       # 从 ModelScope 下载 pretrain_t2t_mini.jsonl
+│   ├── train_tokenizer.py     # 训练 BPE 分词器（对应 notebook 01，支持 --max-lines 子集）
+│   ├── validate_pretrain.py   # 单卡端到端预训练验证（对应 notebook 09/10）
+│   └── pretrain_start.sh      # torchrun DDP 多卡启动
 └── img/                       # 图片素材
 ```
 

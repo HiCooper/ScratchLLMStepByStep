@@ -21,9 +21,14 @@ class TrainConfig:
 
 @dataclass
 class PathConfig:
-    """数据集 / 模型 / tokenizer 路径，按需修改成本机路径。"""
-    # 预训练数据集（.bin 二进制格式，由 texts_to_bin 生成）
-    pretrain_dataset: str = "/data2/minigpt/dataset/pretrain/mobvoi_seq_monkey_general_open_corpus.bin"
+    """数据集 / 模型 / tokenizer 路径，按需修改成本机路径。
+
+    数据从 ModelScope 下载（见 scripts/download_data.sh 与 README「数据集」一节）：
+      pretrain_t2t_mini.jsonl (~1.2GB) -> 中英混合文本，既训练分词器也做预训练原始语料，
+                                          预训练需先用 texts_to_bin 序列化为 .bin（notebook 08）
+    """
+    # 预训练数据集（.bin 二进制格式，由 texts_to_bin 对 pretrain_t2t_mini.jsonl 序列化生成）
+    pretrain_dataset: str = "/data2/minigpt/dataset/pretrain/pretrain_t2t_mini.bin"
     # SFT 指令微调数据集（.jsonl 格式）
     sft_dataset: str = "/data2/minigpt/dataset/sft/sft_data_zh.jsonl"
     # 分词器目录（分词器训练.ipynb 产出）
