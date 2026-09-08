@@ -51,6 +51,25 @@
 - [conda&pytorch环境搭建笔记](https://golfxiao.blog.csdn.net/article/details/140819506)
 - [cuda安装笔记](https://golfxiao.blog.csdn.net/article/details/140877932)
 
+依赖安装见 [`requirements.txt`](./requirements.txt)。
+
+## 💥 工程化说明
+
+正式训练脚本的超参与路径已统一收敛到 [`config.py`](./config.py)，运行前只需改这一处即可，无需再逐个脚本/notebook 找硬编码地址。
+
+模型与训练器都支持一些**前沿开关**（在 `GPTConfig` / `train_args` 中，默认关闭以兼容旧 checkpoint，开启即为前沿配置）：
+
+| 开关 | 位置 | 说明 |
+|---|---|---|
+| `use_swiglu` | GPTConfig | 前馈层用 SwiGLU 门控代替 GELU |
+| `qkv_merged` | GPTConfig | Q/K/V 投影合并为单个 `Linear(dim, 3*dim)` |
+| `tie_word_embeddings` | GPTConfig | 词嵌入与输出头共享权重 |
+| `use_checkpoint` | GPTConfig | 训练时对 FFN 做激活重计算省显存 |
+| `mixed_precision_dtype` | train_args | `float16` / `bfloat16`（bf16 无需 GradScaler） |
+| `gradient_accumulation_steps` | train_args | 梯度累积，用小显存训练大 batch |
+
+> 注意：开启 `use_swiglu`/`qkv_merged`/`tie_word_embeddings` 会改变模型结构，与旧版（GELU/独立 QKV/不共享权重）训练出的 checkpoint 不兼容；加载旧 checkpoint 请保持这些开关关闭。
+
 ## 💥 如何开始？
 1. 克隆本项目到本地：
 ```
