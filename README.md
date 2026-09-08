@@ -93,6 +93,8 @@ bash scripts/download_data.sh
 
 > 注：开启前沿开关（`use_swiglu`/`qkv_merged`/`tie_word_embeddings`）会改变参数量——SwiGLU 每层多 4×emb² 参数，权重共享省掉输出头 vocab×emb；本表档位下 SwiGLU 的增量通常大于权重共享的节省，参数量略有上升。
 
+> ⚠️ 口径说明：本表的「微型/大型/超大」是相对**从零训练、消费级 GPU**的教程语境而言；绝对尺度上 711M 仍属「边缘/入门」级（`M`=百万、`B`=十亿，相差 1000 倍）。主流开源模型从 **7B 起跳**（如 Qwen3-8B 为 8B、emb 4096、36 层、GQA），前沿 MoE 模型（DeepSeek-V3 671B/激活 37B、Kimi K2 1T/激活 32B）总参数更达千亿~万亿级。
+
 **训练时长参考**（以教程默认 134M 模型、1.2GB 数据 ≈ 2 亿 token 的 1 个 epoch 为例，fp16）：
 
 | 单卡 GPU | 相对吞吐(约) | 1 epoch 参考时长 |
@@ -102,6 +104,8 @@ bash scripts/download_data.sh
 | RTX 3090 / 4090 | ~10× | ~2 小时 |
 
 > 以上时长基于本机 RTX 2060 实测（134M、fp16 ≈ 2700 token/s）按算力线性外推，仅作量级参考。完整预训练需多个 epoch（教程的 450K step ≈ 20 epoch），总时长按 epoch 数线性放大；换更大数据则再按比例放大。
+
+> 也可用 `python scripts/estimate_resources.py` 交互式估算——输入配置与目标 GPU，自动输出参数量/显存/起步 GPU/训练时长。
 
 ## 💥 目录结构
 
@@ -125,6 +129,7 @@ bash scripts/download_data.sh
 │   ├── validate_pretrain.py   # 单卡端到端预训练验证（对应 notebook 09/10）
 │   ├── validate_ddp.py        # DDP 链路验证（nproc=1 单卡可跑，nproc=2 需真多卡）
 │   ├── check_env.py           # 打印环境信息(Python/PyTorch/CUDA/GPU/CPU/包版本)
+│   ├── estimate_resources.py  # 估算参数量/显存/起步 GPU/训练时长
 │   └── pretrain_start.sh      # torchrun DDP 多卡启动
 ├── tests/                     # 单元测试(pytest，CPU 即可运行)
 │   ├── conftest.py            # 共享 fixture(小模型/迷你分词器)
