@@ -1,14 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import importlib
-import attention_v1
-# 使用 importlib.reload 来重新加载该模块  
-importlib.reload(attention_v1) 
 
 from typing import Optional, Tuple
 from transformers import PreTrainedModel, PretrainedConfig, AutoTokenizer
-from attention_v1 import MultiHeadAttention, FlashMultiHeadAttention
+from minigpt.model.attention import MultiHeadAttention, FlashMultiHeadAttention
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 MODEL_CONFIG = {

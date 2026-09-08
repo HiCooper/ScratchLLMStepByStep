@@ -9,14 +9,14 @@ __pycache__/
 venv/
 env/
 
-# 模型与数据（体积大，不入库）
+# 模型与数据（体积大，不入库；锚定到根目录，避免误伤 minigpt/data 代码包）
 *.pth
 *.bin
 *.pt
 checkpoint-*/
-models/
-dataset/
-data/
+/models/
+/dataset/
+/data/
 
 # 日志
 *.log

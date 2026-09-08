@@ -9,7 +9,7 @@ from datetime import timedelta
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler, random_split
 from torch.distributed import init_process_group, destroy_process_group
-from transformer import GPTConfig, MiniGPT
+from minigpt.model.transformer import GPTConfig, MiniGPT
 
 
 class Trainer:

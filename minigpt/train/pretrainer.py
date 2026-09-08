@@ -3,10 +3,10 @@ import torch
 import time
 from transformers import AutoTokenizer
 from torch.utils.tensorboard import SummaryWriter
-from config import paths, TrainConfig
-from pretrain_dataset import PretrainBinaryDataset, split_dataset
-from transformer import GPTConfig, MiniGPT
-from trainer import Trainer
+from minigpt.config import paths, TrainConfig
+from minigpt.data.pretrain_dataset import PretrainBinaryDataset, split_dataset
+from minigpt.model.transformer import GPTConfig, MiniGPT
+from minigpt.train.trainer import Trainer
 
 def main():
     tc = TrainConfig()

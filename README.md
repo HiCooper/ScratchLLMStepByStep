@@ -53,9 +53,28 @@
 
 依赖安装见 [`requirements.txt`](./requirements.txt)。
 
+## 💥 目录结构
+
+可复用的代码已整理为 `minigpt` 包，notebook 通过 `%run minigpt/...` 引用：
+
+```
+minigpt/
+├── config.py                  # 集中管理超参与路径（运行前改这里）
+├── model/
+│   ├── attention.py           # 自注意力/多头注意力/FlashAttention/RoPE
+│   └── transformer.py         # LayerNorm/FFN/TransformerBlock/GPTConfig/MiniGPT
+├── data/
+│   ├── pretrain_dataset.py    # 预训练二进制数据集(np.memmap)
+│   └── sft_dataset.py         # SFT 指令数据集/损失掩码
+└── train/
+    ├── trainer.py             # 训练器(单卡/DDP、混合精度、梯度累积)
+    ├── pretrainer.py          # 预训练入口(DDP)
+    └── pretrainer_single.py   # 单卡教学版训练器
+```
+
 ## 💥 工程化说明
 
-正式训练脚本的超参与路径已统一收敛到 [`config.py`](./config.py)，运行前只需改这一处即可，无需再逐个脚本/notebook 找硬编码地址。
+正式训练脚本的超参与路径已统一收敛到 [`minigpt/config.py`](./minigpt/config.py)，运行前只需改这一处即可，无需再逐个脚本/notebook 找硬编码地址。
 
 模型与训练器都支持一些**前沿开关**（在 `GPTConfig` / `train_args` 中，默认关闭以兼容旧 checkpoint，开启即为前沿配置）：
 
@@ -65,10 +84,13 @@
 | `qkv_merged` | GPTConfig | Q/K/V 投影合并为单个 `Linear(dim, 3*dim)` |
 | `tie_word_embeddings` | GPTConfig | 词嵌入与输出头共享权重 |
 | `use_checkpoint` | GPTConfig | 训练时对 FFN 做激活重计算省显存 |
+| `flash_attn` | GPTConfig | 用 FlashAttention 加速注意力 |
 | `mixed_precision_dtype` | train_args | `float16` / `bfloat16`（bf16 无需 GradScaler） |
 | `gradient_accumulation_steps` | train_args | 梯度累积，用小显存训练大 batch |
 
 > 注意：开启 `use_swiglu`/`qkv_merged`/`tie_word_embeddings` 会改变模型结构，与旧版（GELU/独立 QKV/不共享权重）训练出的 checkpoint 不兼容；加载旧 checkpoint 请保持这些开关关闭。
+
+> ⚠️ FlashAttention 硬件约束：`flash_attn=True` 依赖 flash-attn 库的 FlashAttention-2 内核，**只支持 Ampere（sm_80）及以上 GPU**（如 A100、RTX 30/40/50 系列）。旧卡（如 Turing 的 RTX 2060/1660、Pascal/V100 等）无法运行，会直接报错；这类显卡请保持 `flash_attn=False` 走标准注意力实现。
 
 ## 💥 如何开始？
 1. 克隆本项目到本地：
