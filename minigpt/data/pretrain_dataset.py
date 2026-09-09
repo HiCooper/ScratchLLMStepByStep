@@ -1,3 +1,7 @@
+import os
+import json
+import numpy as np
+import torch
 import torch
 import json
 import numpy as np
@@ -153,3 +157,104 @@ def create_dataloaders(ds, batch_size, train_ratio, local_rank=-1):
     # 陷阱：这里的eval_set已经是被split_dataset切过的SubSet类型，它无法再次切割。
     eval_loader = DataLoader(eval_set, batch_size=batch_size, shuffle=True, num_workers=0, drop_last=False)
     return train_loader, eval_loader
+
+
+# ---------------------------------------------------------------------------
+# 生产级数据管线（v2）：jsonl -> uint16/uint32 .bin + .meta.json 元数据
+# ---------------------------------------------------------------------------
+import json as _json
+
+def _resolve_meta(bin_path, meta_path):
+    if meta_path:
+        return meta_path
+    return os.path.splitext(bin_path)[0] + ".meta.json"
+
+def tokenize_jsonl_to_bin(input_path, output_path, tokenizer, content_key="text",
+                          max_lines=0, dtype=None, meta_path="", write_every=200000):
+    """把 jsonl 语料（按行 {content_key: ...}）序列化为二进制 token 流，并写出元数据。
+
+    - 每条文本后追加 tokenizer.eos_token_id 作为文档结束符（无 BOS 的 tokenizer 不加前缀）；
+    - 词表 >65535 时自动使用 uint32，否则默认 uint16（可用 dtype 显式指定）；
+    - 返回 (lines, tokens, dtype)；同目录生成 .meta.json 供训练侧自动识别。
+    """
+    vocab_size = len(tokenizer)
+    dtype = dtype or ("uint32" if vocab_size > 65535 else "uint16")
+    eos_id = tokenizer.eos_token_id
+    n_lines, n_tokens, n_chunks = 0, 0, 0
+    buf = []
+    out_meta = _resolve_meta(output_path, meta_path)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(input_path, "r", encoding="utf-8") as reader, open(output_path, "wb") as writer:
+        while True:
+            line = reader.readline()
+            if not line:
+                break
+            if max_lines and n_lines >= max_lines:
+                break
+            content = _json.loads(line).get(content_key)
+            if not content:
+                n_lines += 1
+                continue
+            ids = tokenizer(content)["input_ids"]
+            if eos_id is not None:
+                ids = list(ids) + [eos_id]
+            buf.extend(ids)
+            n_tokens += len(ids)
+            n_lines += 1
+            if len(buf) >= (1 << 20):
+                _dump_uints(writer, buf, dtype)
+                buf.clear()
+                n_chunks += 1
+        if buf:
+            _dump_uints(writer, buf, dtype)
+    meta = {
+        "dtype": dtype, "lines": n_lines, "tokens": n_tokens,
+        "vocab_size": vocab_size, "eos_id": eos_id,
+        "content_key": content_key, "tokenizer": getattr(tokenizer, "name_or_path", ""),
+    }
+    with open(out_meta, "w", encoding="utf-8") as f:
+        _json.dump(meta, f, ensure_ascii=False, indent=2)
+    print(f"[data] lines={n_lines} tokens={n_tokens} dtype={dtype} -> {output_path}")
+    print(f"[data] meta -> {out_meta}")
+    return n_lines, n_tokens, dtype
+
+
+def _dump_uints(writer, buf, dtype):
+    import numpy as _np
+    writer.write(_np.asarray(buf, dtype=dtype).tobytes())
+
+
+def load_bin_meta(bin_path, meta_path=""):
+    meta_file = _resolve_meta(bin_path, meta_path)
+    if os.path.exists(meta_file):
+        with open(meta_file, encoding="utf-8") as f:
+            return _json.load(f), meta_file
+    return None, meta_file
+
+
+class TokenBinDataset(Dataset):
+    """窗口化 token 流数据集（uint16/uint32 自适应）。
+
+    - 读取 .meta.json 判断 dtype；无 meta 时按 uint16 兼容旧产物。
+    - 返回 (input, target)，长度为 max_len-1 / 由窗口滑出（与 PretrainBinaryDataset 一致：
+      total_tokens//max_len 行，每行 [0,max_len)，输入取 [0,max_len)，目标取 [1,max_len])。
+    """
+
+    def __init__(self, bin_path, max_len, meta_path=""):
+        import numpy as _np
+        self.max_len = max_len
+        self.meta, self.meta_file = load_bin_meta(bin_path, meta_path)
+        self.dtype = (self.meta or {}).get("dtype", "uint16")
+        arr = _np.fromfile(bin_path, dtype=self.dtype)
+        rows = arr.size // max_len
+        self.data = arr[: rows * max_len].reshape(rows, max_len)
+
+    def __len__(self):
+        return self.data.shape[0]
+
+    def __getitem__(self, index):
+        item = self.data[index]
+        input_ids = item[:-1].astype(np.int64)
+        target_ids = item[1:].astype(np.int64)
+        return torch.from_numpy(input_ids), torch.from_numpy(target_ids)
+

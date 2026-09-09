@@ -1,16 +1,21 @@
 # 核心依赖（版本为作者实测环境，可按需调整）
 torch>=2.4.0
-transformers>=4.40.0
+transformers>=4.42.0
 tokenizers>=0.19.0
 numpy>=1.24.0
 
-# 可选：FlashAttention 加速（仅在使用 flash_attn=True 时需要，需匹配 CUDA 版本）
+# notebook 01-15 顺序演示所需（示例环境：transformers 5.1 / torch 2.13 / 单卡 RTX2060 6GB 已验证）
+# 说明：notebook 13/14 的 apply_chat_template(tokenize=True) 修复依赖 return_dict 参数（4.42+ 可用，
+#       5.x 默认返回 BatchEncoding 而非 list[int]，脚本内已显式传 return_dict=False）。
+matplotlib>=3.8.0       # notebook 06/10/15 绘图
+pandas>=2.0.0           # notebook 12 分类微调读取 smsspam 数据
+tensorboard>=2.14.0     # minigpt/train/pretrainer.py 训练日志（notebook 10/11 单进程冒烟需要）
+
+# 可选：FlashAttention 加速（仅在使用 flash_attn=True 时需要，需匹配 CUDA 版本；
+#       RTX 20 系（Turing, sm_75）不支持 FA2 内核，notebook 演示统一 flash_attn=False）
 # flash-attn>=2.5.0
 
 # 可选：开发 / 调试
 pytest>=7.0          # 运行 tests/ 单元测试
-# tensorboard
-# matplotlib
-# pandas
 # imbalanced-learn
 # regex

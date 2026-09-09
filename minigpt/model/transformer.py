@@ -99,6 +99,50 @@ def attention_mask_to_additive(attention_mask):
     """
     return attention_mask.unsqueeze(1).unsqueeze(2)
         
+
+# ---------------------------------------------------------------------------
+# 采样解码工具（temperature / top-k / top-p / repetition penalty）
+# ---------------------------------------------------------------------------
+def apply_repetition_penalty(logits, seq_ids, penalty: float):
+    """对当前序列中出现过的 token 施加惩罚：logit>0 除以 penalty，logit<0 乘 penalty。"""
+    if penalty is None or penalty <= 1.0:
+        return logits
+    logits = logits.clone()
+    for b in range(logits.size(0)):
+        seen = torch.unique(seq_ids[b])
+        g = logits[b, seen]
+        logits[b, seen] = torch.where(g > 0, g / penalty, g * penalty)
+    return logits
+
+
+def filter_logits_top_k_top_p(logits, top_k=None, top_p=None):
+    if top_k is not None and top_k > 0:
+        k = min(int(top_k), logits.size(-1))
+        kth = torch.topk(logits, k, dim=-1).values[..., -1:]
+        logits = torch.where(logits < kth,
+                             torch.full_like(logits, float("-inf")), logits)
+    if top_p is not None and 0.0 < top_p < 1.0:
+        sorted_logits, sorted_idx = torch.sort(logits, descending=True, dim=-1)
+        cum_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+        remove = cum_probs - torch.softmax(sorted_logits, dim=-1) > top_p
+        sorted_logits = sorted_logits.masked_fill(remove, float("-inf"))
+        out = torch.full_like(logits, float("-inf"))
+        out.scatter_(-1, sorted_idx, sorted_logits)
+        logits = out
+    return logits
+
+
+def sample_next_token(logits, do_sample: bool, temperature: float = 1.0,
+                      top_k=None, top_p=None):
+    if temperature != 1.0:
+        logits = logits / max(float(temperature), 1e-6)
+    logits = filter_logits_top_k_top_p(logits, top_k, top_p)
+    if not do_sample:
+        return torch.argmax(logits, dim=-1, keepdim=True)
+    probs = torch.softmax(logits, dim=-1)
+    return torch.multinomial(probs, num_samples=1)
+
+
 class GPTConfig(PretrainedConfig):
     # 每个模型都必须有一个独特的model_type，否则会报"Should have a `model_type` key in its config.json"
     model_type = "minigpt"
@@ -200,7 +244,9 @@ class MiniGPT(PreTrainedModel):
         return CausalLMOutputWithPast(logits=logits, past_key_values=past_kvs)
  
     @torch.inference_mode()
-    def generate(self, input_ids, max_length=512, eos_token_id=-1, **kwargs):
+    def generate(self, input_ids, max_length=512, eos_token_id=-1,
+                 do_sample=False, temperature=1.0, top_k=None, top_p=None,
+                 repetition_penalty=1.0, **kwargs):
         assert isinstance(max_length, int) and max_length > 0
         eos_reached = torch.zeros(len(input_ids), dtype=torch.bool, device=input_ids.device)
         past_kvs = None
@@ -219,11 +265,11 @@ class MiniGPT(PreTrainedModel):
             past_kvs = output["past_key_values"] if use_kv_cache else None
             # 只取每个序列最后一个token的输出向量作为logits, shape变为: batch, vocab_size
             logits = output["logits"][:, -1, :]
-            # 使用softmax函数将logits转换为下一个token的概率分布，shape仍是: batch, vocab_size
-            probs = torch.softmax(logits, dim=-1)
-            # 取概率最大的作为next_input_ids，形状变为：batch, 1
-            next_token_ids = torch.argmax(probs, dim=-1, keepdim=True)
-            # 将next_token_id连接到下一个token的结尾， 形状变为：batch, n_tokens+1
+            # 采样策略：repetition penalty -> temperature/top-k/top-p -> 采样/贪心
+            logits = apply_repetition_penalty(logits, input_ids, repetition_penalty)
+            next_token_ids = sample_next_token(
+                logits, do_sample=do_sample, temperature=temperature,
+                top_k=top_k, top_p=top_p)
             input_ids = torch.cat((input_ids, next_token_ids), dim=1)
             # 更新 eos_reached
             eos_reached |= (next_token_ids.squeeze(-1) == eos_token_id)

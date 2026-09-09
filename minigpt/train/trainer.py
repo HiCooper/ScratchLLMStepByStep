@@ -1,7 +1,9 @@
 import os
 import math
-import torch
+import random as _random
 import time
+import numpy as np
+import torch
 import torch.nn.functional as f
 from contextlib import nullcontext
 import torch.distributed as dist
@@ -51,6 +53,14 @@ class Trainer:
         self.is_main_process = True
         self.scaler = None
         self.batch_collator = None
+        # ---- 生产化扩展 ----
+        self.writer = None                       # tensorboard SummaryWriter（可选）
+        self.grad_clip = float(train_args.get("grad_clip", 1.0))
+        self.max_updates = int(train_args.get("max_steps", 0) or 0)
+        self.effective_max = 0                   # train() 中根据 loader 确定
+        self.best_eval_loss = float("inf")
+        self.last_eval_loss = None
+        self.final_metrics = {}
 
     def set_seed(self, seed):
         torch.manual_seed(seed)
@@ -98,6 +108,13 @@ class Trainer:
             "optimizer_state": optimizer.state_dict(),
             "epoch": epoch,
             "step": step,
+            "scaler_state": self.scaler.state_dict() if self.scaler is not None else None,
+            "rng_state": {
+                "torch": torch.get_rng_state(),
+                "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                "numpy": np.random.get_state(),
+                "random": _random.getstate(),
+            },
         }, checkpoint_path)
 
     def _load_from_checkpoint(self):
@@ -111,6 +128,19 @@ class Trainer:
 
         self.step = checkpoint.get('step', 0)
         last_epoch = checkpoint.get('epoch', 0)
+        # 恢复混合精度缩放器与随机数状态，保证续训可复现
+        if self.scaler is not None and checkpoint.get("scaler_state") is not None:
+            self.scaler.load_state_dict(checkpoint["scaler_state"])
+        rng = checkpoint.get("rng_state")
+        if rng is not None:
+            torch.set_rng_state(rng["torch"])
+            if rng.get("cuda") and torch.cuda.is_available():
+                torch.cuda.set_rng_state_all(rng["cuda"])
+            if rng.get("numpy") is not None:
+                np.random.set_state(rng["numpy"])
+            if rng.get("random") is not None:
+                import random as _r
+                _r.setstate(tuple(rng["random"]))
         print(f"load from checkpoint: {self.last_checkpoint_path}, last_epoch:{last_epoch}, last_step: {self.step}")
         return last_epoch
     
@@ -177,6 +207,14 @@ class Trainer:
             + f"eval_loss: {eval_loss:.4f}, grad_norm={grad_norm:.5f}, "
             + f"steps: {self.step}/{self.total_steps}"
         )
+        self.last_eval_loss = eval_loss
+        self.best_eval_loss = min(self.best_eval_loss, eval_loss)
+        if self.writer is not None:
+            self.writer.add_scalar("train/loss", train_loss, self.step)
+            self.writer.add_scalar("eval/loss", eval_loss, self.step)
+            self.writer.add_scalar("eval/perplexity", math.exp(min(eval_loss, 80.0)), self.step)
+            self.writer.add_scalar("train/lr", lr, self.step)
+            self.writer.add_scalar("train/grad_norm", grad_norm, self.step)
 
     @staticmethod
     def _get_dynamic_lr(target_lr, cur_step, warmup_steps, decay_steps):
@@ -286,13 +324,13 @@ class Trainer:
         if use_amp and self.scaler is not None:
             self.scaler.unscale_(self.optimizer)
             self.last_grad_norm = self._calc_grad_norm()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
             self.scaler.step(self.optimizer)
             self.scaler.update()
         else:
             # 梯度裁剪在混合精度与全精度下保持一致，防止梯度爆炸
             self.last_grad_norm = self._calc_grad_norm()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
             self.optimizer.step()  # 更新参数
         self.optimizer.zero_grad(set_to_none=True)
         self.micro_step = 0
@@ -309,6 +347,8 @@ class Trainer:
         print(f"{self.cur_time()} start epoch:{cur_epoch} from step:{self.step}") if self.verbose else None
 
         for i, batch in enumerate(self.train_loader):
+            if self.effective_max and self.step >= self.effective_max:
+                return
             if i < skip_micro: continue
             X, Y = batch[0].to(self.device), batch[1].to(self.device)
             attnmask = batch[2].to(self.device) if len(batch) == 3 else None
@@ -328,6 +368,8 @@ class Trainer:
         self._init_distributed_mode()
         # 初始化数据加载器
         self._init_dataloader()
+        # 总更新步数（max_steps 生效时截断训练）
+        self.effective_max = self.max_updates if self.max_updates > 0 else self.total_steps
         # 初始化梯度缩放器
         self._init_grad_scaler()
         # 将模型移动到指定设备上
@@ -338,11 +380,41 @@ class Trainer:
         # 分布式训练需要使用ddp同步模型状态
         if self.ddp:
             self.model = self._wrap_model_with_ddp(self.model, self.local_rank)
-        
+        self.step = min(self.step, self.effective_max) if self.effective_max else self.step
+
         for epoch in range(last_epoch, self.num_epochs):
+            if self.effective_max and self.step >= self.effective_max:
+                break
             self._train_epoch(epoch)
 
+        # 结束：主进程做最终评估并保存 final.pt（含完整 RNG/缩放器状态）
+        if self.is_main_process:
+            if self.total_steps > 0:
+                final_eval = self._evaluate()
+                self.final_metrics = {
+                    "step": self.step,
+                    "epoch": last_epoch + max(0, self.num_epochs - last_epoch - 1)
+                             if self.step else last_epoch,
+                    "train_loss": self.train_loss_acc / max(1, self.eval_steps),
+                    "eval_loss": final_eval,
+                    "perplexity": float(math.exp(min(final_eval, 80.0))),
+                    "best_eval_loss": self.best_eval_loss,
+                }
+                if self.writer is not None:
+                    self.writer.add_scalar("eval/final_loss", final_eval, self.step)
+            os.makedirs(self.output_dir, exist_ok=True) if self.output_dir else None
+            if self.output_dir:
+                self._save_model(os.path.join(self.output_dir, "final.pt"), self.num_epochs - 1)
+                print(f"{self.cur_time()} final checkpoint saved: "
+                      f"{os.path.join(self.output_dir, 'final.pt')}")
+            if self.writer is not None:
+                self.writer.flush()
+                self.writer.close()
         self._cleanup()
+
+    def set_writer(self, writer):
+        """注入 tensorboard SummaryWriter（仅主进程）。"""
+        self.writer = writer
     
     def predict(self, tokenizer, input_text, max_length=100):
         inputs = torch.tensor([tokenizer.encode(input_text)]).to(self.device)

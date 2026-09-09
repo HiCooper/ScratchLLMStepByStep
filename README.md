@@ -194,3 +194,59 @@ git clone https://github.com/golfxiao/ScratchLLMStepByStep.git
 最后，感谢您阅读这个教程。如果觉得对您有所帮助，可以考虑送我一杯奶茶作为鼓励😊
 
 ![a cup of tea](./img/cup_of_tea.jpg)
+
+---
+
+## 🔧 生产级训练/推理（非 notebook demo）
+
+仓库除教学 notebook 外，提供一套按生产规范组织的训练/推理/验证链路（配置集中化、CLI 覆盖、
+DDP/torchrun、AMP+梯度累积、checkpoint/RNG 恢复、tensorboard、采样推理、pytest）。
+
+### 配置
+- `minigpt/config.py`：`ModelConfig / DataConfig / TrainConfig / PathConfig` 默认值全部基于仓库根自动定位；
+  任意入口都接受扁平 CLI 覆盖：`--model_emb_dim 384 --train_batch_size 8 --paths_output_dir ...`；
+  运行配置会以 `config.json` 快照写入输出目录，可复现。
+
+### 数据管线（jsonl → .bin）
+```bash
+python scripts/build_pretrain_bin.py build \
+    --corpus-jsonl dataset/pretrain_t2t_mini.jsonl \
+    --tokenizer-dir models/tokenizer_qwen2 \
+    --out-bin dataset/bins/pretrain_qwen.bin --max-lines 600000
+python scripts/build_pretrain_bin.py info --bin dataset/bins/pretrain_qwen.bin
+```
+自动按词表选择 uint16/uint32 并生成 `.meta.json`；`TokenBinDataset` 按元数据自动识别。
+
+### 预训练
+```bash
+# 单卡
+python3 -m minigpt.train.pretrainer \
+    --model_emb_dim 384 --model_n_layers 8 --model_n_heads 8 --model_context_length 512 \
+    --train_batch_size 8 --train_warmup_steps 800 --train_eval_steps 400 --train_save_steps 2000 \
+    --paths_output_dir models/checkpoints/pretrain_qwen_v1
+# 多卡 DDP
+NPROC=2 bash scripts/pretrain_start.sh --paths_output_dir models/checkpoints/pretrain_ddp
+```
+产物：`checkpoint-{step}.pth`（含 optimizer/RNG/scaler）、`final.pt`（含 config，供推理）、
+`tensorboard/`、`metrics.json`、`sample.txt`。续训：`--paths_last_checkpoint_path .../checkpoint-N.pth`。
+
+### 采样推理
+```bash
+python scripts/generate.py --checkpoint models/checkpoints/pretrain_qwen_v1/final.pt \
+    --tokenizer-dir models/tokenizer_qwen2 --prompt "什么是AI？" --chat \
+    --do-sample --temperature 0.8 --top-k 50 --top-p 0.9 --repeat-penalty 1.1 \
+    --max-new-tokens 200
+# 或 --interactive / --prompt-file
+```
+
+### 评估与测试
+```bash
+python scripts/evaluate_pretrain.py --checkpoint models/checkpoints/pretrain_qwen_v1/final.pt \
+    --tokenizer-dir models/tokenizer_qwen2 --bin dataset/bins/pretrain_qwen.bin --max-rows 2000
+pytest tests/ -q        # 数据管线 / 采样 / config / 模型 / trainer 单元测试
+```
+
+### 说明
+- `models/tokenizer_qwen2`：从 ModelScope 获取的 Qwen2.5-0.5B tokenizer（151,665 词表，现代中文 BPE，
+  自带 `<|im_start|>/<|im_end|>` chat 模板），训练侧由此推导词表大小；默认启用输入/输出嵌入权重共享（`--model_tie_word_embeddings`）。
+- RTX 20 系（Turing）不支持 FlashAttention-2，默认 `flash_attn=False`。

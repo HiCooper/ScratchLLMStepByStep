@@ -1,12 +1,21 @@
 #!/bin/bash
-# 预训练启动脚本：使用 torchrun 以 DDP 方式在多卡上训练。
-# 脚本位于 scripts/ 下，先切回项目根目录，保证 minigpt 包与相对路径可用。
+# 生产预训练启动脚本（可多卡 DDP，也可单卡）：用法
+#   bash scripts/pretrain_start.sh [extra args...]
+# 说明：所有路径/超参均可通过 CLI 扁平参数覆盖（见 minigpt/config.py），
+#       例：--model_emb_dim 512 --train_batch_size 8 --paths_output_dir models/checkpoints/pretrain_v2
+set -euo pipefail
+cd "$(dirname "$0")/.."
 
-cd "$(dirname "$0")/.." || exit 1
+NPROC="${NPROC:-1}"
+LOG_DIR="$(python3 -c 'from minigpt.config import PathConfig; import os; print(os.path.dirname(PathConfig.output_dir))' 2>/dev/null || echo models/checkpoints)"
+mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/pretrain_start_$(date +%Y%m%d_%H%M%S).log"
 
-export CUDA_VISIBLE_DEVICES=0,1
-# 让 torchrun 启动的子进程能找到 minigpt 包（项目根目录加入 PYTHONPATH）
-export PYTHONPATH=$(pwd):$PYTHONPATH
-
-nohup torchrun --nproc_per_node 2 minigpt/train/pretrainer.py > /data2/minigpt/models/20241210/20250114.log 2>&1 &
-
+if [ "$NPROC" -gt 1 ]; then
+    echo "启动 $NPROC 卡 DDP 训练，日志: $LOG"
+    nohup torchrun --nproc_per_node "$NPROC" -m minigpt.train.pretrainer "$@" > "$LOG" 2>&1 &
+else
+    echo "启动单卡训练，日志: $LOG"
+    nohup python3 -m minigpt.train.pretrainer "$@" > "$LOG" 2>&1 &
+fi
+echo "pid=$!"

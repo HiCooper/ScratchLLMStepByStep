@@ -34,7 +34,9 @@ class InstructionDataset(Dataset):
         assistant_content = item['output']
         messages.append({"role": "user", "content": user_content})
         messages.append({"role": "assistant", "content": assistant_content})
-        input_ids =  self.tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False)
+        input_ids = self.tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False)
+        if not isinstance(input_ids, list):  # transformers>=5.0 返回 BatchEncoding，解包为 list[int]
+            input_ids = input_ids["input_ids"]
         return input_ids[:self.max_len]
 
     def __getitem__(self, idx):
