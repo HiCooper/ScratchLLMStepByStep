@@ -63,8 +63,9 @@ def estimate_params(cfg: dict) -> str:
         return "?"
 
 
-def collect():
-    cp = os.path.join(ROOT, "models", "checkpoints")
+def collect(cp: str | None = None):
+    """扫描 checkpoints 目录并汇总（cp 可指定，便于测试）。"""
+    cp = cp or os.path.join(ROOT, "models", "checkpoints")
     data = {"time": datetime.now().strftime("%F %T"), "pretrain": [], "sft": [],
             "thinking": {}, "ppl": {}, "samples": {}, "success_rate": {}}
     for path in sorted(glob.glob(os.path.join(cp, "pretrain_*", "metrics.json"))):
@@ -156,8 +157,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=os.path.join(ROOT, "models", "checkpoints", "TRAINING_REPORT.md"))
     ap.add_argument("--json", default=None, help="同时输出结构化 JSON（供 agent 解析）")
+    ap.add_argument("--dir", default=None, help="checkpoints 目录（默认 models/checkpoints）")
     args = ap.parse_args()
-    d = collect()
+    d = collect(args.dir)
     md = render(d)
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
