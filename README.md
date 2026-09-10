@@ -190,11 +190,6 @@ git clone https://github.com/golfxiao/ScratchLLMStepByStep.git
 3. 按照顺序阅读每个Notebook，并运行其中的代码。
 4. 根据需要修改和实验代码，以加深对相关概念的理解。
 
-
-最后，感谢您阅读这个教程。如果觉得对您有所帮助，可以考虑送我一杯奶茶作为鼓励😊
-
-![a cup of tea](./img/cup_of_tea.jpg)
-
 ---
 
 ## 🔧 生产级训练/推理（非 notebook demo）
