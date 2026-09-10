@@ -230,6 +230,17 @@ setsid nohup bash scripts/train_pretrain_resilient.sh > models/checkpoints/pretr
 过滤 `quality_score`/`max_line_length` 可显著提纯；若目标是"思考模式"，数学语料（IndustryCorpus2_mathematics_statistics_high）
 比代码更适合，可从中抽取题目构造 CoT 指令题。
 
+**实测警告：混 15% 不够。** 本仓库真实跑过一轮 `lr=1e-4 / 1 epoch / mix 15%` 的代码领域续训（26,847 步 / 74 分钟）：
+领域 ppl 80.79 → **28.72（−64%）**，但通用 ppl 23.66 → **33.43（+41%）**，下游对话 SFT eval_loss
+2.7795 → 2.9087，样例里"你是谁"开始答非所问。**因此领域续训必须双口径验收**：
+
+```bash
+TAG=domain bash scripts/run_domain_compare.sh   # 领域 bin + 通用 bin 各跑一次同切分 ppl，并刷新 TRAINING_REPORT.md
+```
+
+验收标准（缺一不可）：领域 ppl 明显下降 **且** 通用 ppl 上升不超过 ~5%。不达标就降 lr（1e-5~3e-5）、
+提高混料比（30%+）或减少步数；宁可领域增益小一点，也不要破坏基座。
+
 **增量续训最大的坑（真实踩过，务必检查）**：`--train_max_steps` 是**绝对步数**。
 从 211000 步的基座"再训 26847 步"如果直接传 `--train_max_steps 26847`，trainer 加载后
 `step=211000 ≥ max_steps` 会**立刻判定训练完成**（几十秒产出 final.pt，实际一步没训）；

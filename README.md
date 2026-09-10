@@ -291,12 +291,20 @@ setsid nohup bash scripts/run_code_domain.sh > models/checkpoints/domain_pipelin
 
 ### 基座对比（同一 `.bin`、同一 `--max-rows 512`，口径严格一致）
 
-| 基座 | 训练步数 | 训练 tokens | eval_loss | perplexity | 相对 v1 |
-|---|---|---|---|---|---|
-| `pretrain_v1_512` | 49,509 | 0.68 亿 | 3.6323 | 37.80 | — |
-| `pretrain_v2_full` | 211,000 | 8.6 亿 | **3.1637** | **23.66** | loss **−12.9%**，ppl **−37.4%** |
+| 基座 | 训练步数 | 训练 tokens | 通用 eval_loss | 通用 ppl | 代码领域 eval_loss | 代码领域 ppl |
+|---|---|---|---|---|---|---|
+| `pretrain_v1_512` | 49,509 | 0.68 亿 | 3.6323 | 37.80 | — | — |
+| `pretrain_v2_full` | 211,000 | 8.6 亿 | **3.1637** | **23.66** | 4.3919 | 80.79 |
+| `pretrain_domain_code` | +26,847（领域续训） | +1.1 亿 | 3.5095 | 33.43 | **3.3576** | **28.72** |
 
 10 小时把同切分 ppl 从 37.8 降到 23.7，是本仓库"规模换质量"最直接的一组数据。
+
+**领域增量预训练（`dataset/IndustryCorpus2_computer_programming_code_high`）**：74 分钟、lr=1e-4、1 epoch、
+混入 15% 通用语料，把代码领域 ppl 从 **80.79 打到 28.72（−64%）**；但代价是通用 ppl 从 23.66 退到 33.43
+（**+41%**）——15% 混料不足以抵消 1e-4 一步到位的偏移，属于典型的部分灾难性遗忘。下游对话 SFT 的 eval_loss
+也从 2.7795 升到 2.9087，样例里甚至出现"抱歉，我无法回答这个问题。但我可以告诉你关于计算机程序的语法和编程模型"。
+结论：**领域自适应必须双口径验收**（`bash scripts/run_domain_compare.sh`），并按需降低 lr（1e-5~3e-5）、
+提高混料比（30%+）或减少步数；本次数据保留下来正是为了说明"领域增益 ≠ 无损"。
 
 ### 下游 SFT / CoT（v2 基座，`models/checkpoints/sft_v2_*`）
 
@@ -304,7 +312,7 @@ setsid nohup bash scripts/run_code_domain.sh > models/checkpoints/domain_pipelin
 |---|---|---|---|
 | `sft_v2_chat` | `sft_data_zh.jsonl` 60k × 2 epochs | 14,700 | 2.7795 |
 | `sft_v2_cot_easy` | `sft_cot_easy_60k.jsonl`（45k 合成 + 15k 通用）× 2 epochs | 14,700 | 1.7397（best 1.6109@12499） |
-| `sft_v2_cot_hard` | `sft_cot_hard_80k.jsonl`（60k 合成 + 20k 通用）× 3 epochs | 29,400 | 1.36 附近 |
+| `sft_v2_cot_hard` | `sft_cot_hard_80k.jsonl`（60k 合成 + 20k 通用）× 3 epochs | 29,400 | 1.3565 |
 
 思考模式留出集（60 题，贪心解码，`--repetition-penalty 1.0`）：
 
@@ -313,11 +321,14 @@ setsid nohup bash scripts/run_code_domain.sh > models/checkpoints/domain_pipelin
 | **easy**（1~2 位数单/两步） | 预训练基座（v1） | 0.0% | 1.7% | 1.7% |
 | | CoT-SFT v1（20k 条） | 90.0% | 90.0% | 90.0% |
 | | **CoT-SFT v2（60k 条 × 2ep）** | **100.0%** | **100.0%** | **98.3%** |
+| | CoT-SFT domain（代码领域基座） | **100.0%** | **100.0%** | **98.3%** |
 | **hard**（多位数四则 + 应用题） | CoT-SFT v1（30k 条） | 1.7% | 3.3% | 3.3% |
 | | CoT-SFT v2（80k 条 × 3ep） | 1.7% | 3.3% | 3.3% |
+| | CoT-SFT domain | 1.7% | 1.7% | 1.7% |
 
 结论：**更强基座 + 更多 CoT 数据把 easy 从 90% 推到 100%**；hard 仍是容量墙（47.9M 参数在多位数乘加上算不对），
-需要放大模型或走「工具调用范式」（模型只生成算式，由 Python 结算）。详见 `minigpt/README.md` §8。
+需要放大模型或走「工具调用范式」（模型只生成算式，由 Python 结算）。领域基座在 easy 上追平 v2（窄任务靠 SFT
+重新学会），但 hard 与对话质量双双下滑——**领域增益没有换来推理能力**。详见 `minigpt/README.md` §8。
 
 ### 生成示例（SFT 后，温度0.8/top-k50/top-p0.92）
 ```

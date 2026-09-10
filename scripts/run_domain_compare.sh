@@ -12,7 +12,6 @@ cd "$(dirname "$0")/.."
 
 TOK="${TOK:-models/tokenizer_v3}"
 TAG="${TAG:-domain}"
-GEN_BIN="${GEN_BIN:-dataset/bins/pretrain_v3_full.bin}"
 DOM_BIN="${DOM_BIN:-dataset/bins/code_domain.bin}"
 MAX_ROWS="${MAX_ROWS:-512}"
 # 领域基座（本 run）与对照基座（增量续训的起点）
@@ -37,8 +36,7 @@ else
   log "未找到领域基座 checkpoint（$DOM_CKPT），跳过领域口径"
 fi
 
-log "=== 通用语料同切分 ppl 兜底复核（$GEN_BIN）==="
-run_one "$DOM_CKPT" "$GEN_BIN" "${TAG}_general"
+# 通用语料口径由 run_downstream.sh 的 4c 阶段产出（PPL_CKPTS 已含领域基座），这里不重复跑。
 
 log "=== 刷新训练报告 ==="
 python3 scripts/report_training.py --out models/checkpoints/TRAINING_REPORT.md \
