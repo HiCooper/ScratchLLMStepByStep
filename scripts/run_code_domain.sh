@@ -56,11 +56,12 @@ log "领域语料 tokens=$TOKENS"
 # ---------------- 1) 等待 GPU 空闲（当前下游跑完） ----------------
 log "=== 1) 等待当前下游 SFT/评测结束 ==="
 for i in $(seq 1 480); do   # 最多等 4 小时
-  busy=$(ps -eo pid,args | grep -v grep | grep -cE 'minigpt\.train\.(sft_)?trainer|eval_thinking|evaluate_pretrain' || true)
-  if [ "$busy" = "0" ]; then break; fi
+  busy=$(ps -eo pid,args | grep -v grep | grep -cE 'minigpt\.train\.(sft_)?trainer|eval_thinking|evaluate_pretrain|scripts/generate\.py' || true)
+  free=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -1 || echo 0)
+  if [ "$busy" = "0" ] && [ "${free:-0}" -ge 3000 ]; then break; fi
   sleep 30
 done
-log "GPU 空闲检测结束（busy=$busy）"
+log "GPU 空闲检测结束（busy=$busy, free_vram=${free}MB）"
 
 # ---------------- 2) 增量预训练（自愈守护） ----------------
 STEPS_BY_TOKENS=$(( TOKENS / 4088 ))                       # bs8 × (ctx512-1)
