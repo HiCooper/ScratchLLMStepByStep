@@ -93,15 +93,34 @@ def main():
         "mixed_precision_dtype": tc.mixed_precision_dtype
         if tc.mixed_precision_dtype in ("float16", "bfloat16") else "float16",
         "num_workers": tc.num_workers,
+        "torch_compile": tc.torch_compile,
+        "compile_mode": tc.compile_mode,
     }
     trainer = Trainer(model, optimizer, train_args, device=device, verbose=rank0)
     if rank0:
         try:
             from torch.utils.tensorboard import SummaryWriter
-            trainer.set_writer(SummaryWriter(os.path.join(pc.output_dir, "tensorboard")))
+            from minigpt.train.metrics import MetricsLogger
+            writer = SummaryWriter(os.path.join(pc.output_dir, "tensorboard"))
+            trainer.set_writer(writer)
+            trainer.tokenizer = tokenizer
+            trainer.metrics = MetricsLogger(
+                writer, model, tokenizer=tokenizer, device=device,
+                log_hist_every=tc.log_hist_every, log_hist_max_numel=tc.log_hist_max_numel,
+                log_embedding_every=tc.log_embedding_every,
+                projector_max_tokens=tc.projector_max_tokens,
+                log_attention_every=tc.log_attention_every, log_graph=tc.log_graph,
+                log_samples_every=tc.log_samples_every,
+                sample_max_new_tokens=tc.sample_max_new_tokens,
+                sample_prompts=[x for x in (tc.sample_prompts or "").split("|") if x],
+            )
+            print(f"[pretrainer] tensorboard metrics enabled "
+                  f"(hist/{tc.log_hist_every} emb/{tc.log_embedding_every} "
+                  f"attn/{tc.log_attention_every} graph/{tc.log_graph})")
         except Exception as exc:  # noqa: BLE001
             print(f"[pretrainer] tensorboard disabled: {exc}")
     trainer.set_seed(tc.seed)
+    trainer.extra_ckpt = gpt_cfg.to_dict()   # 周期 checkpoint 与 final.pt 都带 config
     trainer.set_dataset(train_set, eval_set)
     trainer.train()
 

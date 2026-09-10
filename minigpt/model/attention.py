@@ -154,6 +154,9 @@ class MultiHeadAttention(nn.Module):
             scaled_atten_scores = scaled_atten_scores + additive_mask
 
         atten_weights = torch.softmax(scaled_atten_scores, dim=-1)
+        # 供训练期指标可视化（tensorboard 图像面板）按需捕获注意力权重；默认关闭，不影响性能
+        if getattr(self, "capture_attention", False):
+            self.last_attention = atten_weights.detach()
         atten_weights = self.dropout(atten_weights)
 
         context_vecs = atten_weights @ v   # shape: b, num_heads, num_queries, head_dim

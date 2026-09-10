@@ -66,6 +66,18 @@ class TrainConfig:
     mixed_precision_dtype: str = "float16"   # float16 | bfloat16 | none
     seed: int = 123
     num_workers: int = 0
+    torch_compile: bool = False        # 预训练固定形状下启用可显著提速（SFT 变长序列不建议）
+    compile_mode: str = "default"      # torch.compile mode: default/reduce-overhead/max-autotune
+    # ---- tensorboard 训练过程指标（见 minigpt/README.md）----
+    log_hist_every: int = 500          # 权重/梯度直方图间隔（0=关闭）
+    log_hist_max_numel: int = 2_000_000  # 超大张量（如大词表 embedding）跳过直方图
+    log_embedding_every: int = 2000     # 嵌入投影（projector）间隔（0=关闭）
+    projector_max_tokens: int = 2000    # 投影面板最多写入多少个 token 向量
+    log_attention_every: int = 1000     # 注意力热力图间隔（0=关闭）
+    log_graph: bool = False             # 是否记录模型计算图（add_graph）
+    log_samples_every: int = 0          # 周期性打印/记录生成样本（0=仅结束时）
+    sample_max_new_tokens: int = 60
+    sample_prompts: str = "什么是AI？|如何保持身体健康？|从前有座山，山上有座庙"
 
 
 @dataclass

@@ -61,6 +61,11 @@ class Trainer:
         self.best_eval_loss = float("inf")
         self.last_eval_loss = None
         self.final_metrics = {}
+        self.extra_ckpt = None   # 附加到每个 checkpoint 的字典（如 config）
+        self.torch_compile = bool(train_args.get("torch_compile", False))
+        self.compile_mode = train_args.get("compile_mode", "default")
+        self.metrics = None      # 可选的 MetricsLogger（tensorboard 直方图/图像/投影/模型图）
+        self.tokenizer = None    # 可选：供 metrics 生成样本文本与嵌入 metadata
 
     def set_seed(self, seed):
         torch.manual_seed(seed)
@@ -99,11 +104,17 @@ class Trainer:
         self.total_steps = self.num_epochs * self.updates_per_epoch
         print(f'init train_loader steps: {len(self.train_loader)}, eval_loader: {len(self.eval_loader)}') if self.verbose else None
 
+    def _unwrap(self):
+        """取出真实模型：兼容 DistributedDataParallel 与 torch.compile(OptimizedModule)。"""
+        model = self.model
+        model = model.module if isinstance(model, DistributedDataParallel) else model
+        return getattr(model, "_orig_mod", model)
+
     def _save_model(self, checkpoint_path, epoch):
         model, optimizer, step = self.model, self.optimizer, self.step
         os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
-        local_model = model.module if isinstance(model, DistributedDataParallel) else model
-        torch.save({
+        local_model = self._unwrap()
+        payload = {
             "model_state": local_model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
             "epoch": epoch,
@@ -115,7 +126,10 @@ class Trainer:
                 "numpy": np.random.get_state(),
                 "random": _random.getstate(),
             },
-        }, checkpoint_path)
+        }
+        if self.extra_ckpt is not None:
+            payload["config"] = self.extra_ckpt
+        torch.save(payload, checkpoint_path)
 
     def _load_from_checkpoint(self):
         # 在分布式训练的多GPU环境中，map_location可以确保模型的参数和优化器的状态被加载到正确的GPU上，避免出现设备不匹配而报错。
@@ -133,9 +147,15 @@ class Trainer:
             self.scaler.load_state_dict(checkpoint["scaler_state"])
         rng = checkpoint.get("rng_state")
         if rng is not None:
-            torch.set_rng_state(rng["torch"])
+            # 注意：torch.load(map_location=device) 会把 RNG 的 ByteTensor 也搬到 GPU，
+            # 而 set_rng_state 要求 CPU ByteTensor，这里统一 .cpu() 修正
+            torch_state = rng["torch"]
+            if torch.is_tensor(torch_state):
+                torch_state = torch_state.cpu()
+            torch.set_rng_state(torch_state)
             if rng.get("cuda") and torch.cuda.is_available():
-                torch.cuda.set_rng_state_all(rng["cuda"])
+                cuda_states = [st.cpu() if torch.is_tensor(st) else st for st in rng["cuda"]]
+                torch.cuda.set_rng_state_all(cuda_states)
             if rng.get("numpy") is not None:
                 np.random.set_state(rng["numpy"])
             if rng.get("random") is not None:
@@ -209,12 +229,14 @@ class Trainer:
         )
         self.last_eval_loss = eval_loss
         self.best_eval_loss = min(self.best_eval_loss, eval_loss)
-        if self.writer is not None:
+        if self.writer is not None and self.metrics is None:
             self.writer.add_scalar("train/loss", train_loss, self.step)
             self.writer.add_scalar("eval/loss", eval_loss, self.step)
             self.writer.add_scalar("eval/perplexity", math.exp(min(eval_loss, 80.0)), self.step)
             self.writer.add_scalar("train/lr", lr, self.step)
             self.writer.add_scalar("train/grad_norm", grad_norm, self.step)
+        if self.metrics is not None:
+            self.metrics.on_eval(self.step, train_loss, eval_loss, lr, grad_norm)
 
     @staticmethod
     def _get_dynamic_lr(target_lr, cur_step, warmup_steps, decay_steps):
@@ -358,6 +380,9 @@ class Trainer:
             # 只有真正完成一次参数更新才推进 step 计数并触发 eval/save
             if did_update:
                 self.step += 1
+                if self.metrics is not None:
+                    self.metrics.on_train_step(self.step, train_loss.item(), lr,
+                                               self.last_grad_norm, batch)
                 self._check_and_evaluate(lr)
                 self._check_and_save_checkpoint(cur_epoch)
             
@@ -380,6 +405,10 @@ class Trainer:
         # 分布式训练需要使用ddp同步模型状态
         if self.ddp:
             self.model = self._wrap_model_with_ddp(self.model, self.local_rank)
+        if self.torch_compile:
+            print(f"[trainer] torch.compile(mode={self.compile_mode}) 已启用（固定形状下提速显著）") \
+                if self.verbose else None
+            self.model = torch.compile(self.model, mode=self.compile_mode)
         self.step = min(self.step, self.effective_max) if self.effective_max else self.step
 
         for epoch in range(last_epoch, self.num_epochs):
@@ -407,6 +436,8 @@ class Trainer:
                 self._save_model(os.path.join(self.output_dir, "final.pt"), self.num_epochs - 1)
                 print(f"{self.cur_time()} final checkpoint saved: "
                       f"{os.path.join(self.output_dir, 'final.pt')}")
+            if self.metrics is not None:
+                self.metrics.on_final(self.step, final_eval if self.total_steps > 0 else None)
             if self.writer is not None:
                 self.writer.flush()
                 self.writer.close()
@@ -420,5 +451,6 @@ class Trainer:
         inputs = torch.tensor([tokenizer.encode(input_text)]).to(self.device)
         model = self.model.module if isinstance(self.model, DistributedDataParallel) else self.model
         response_ids = model.generate(inputs, max_length=max_length, eos_token_id=tokenizer.eos_token_id, use_kv_cache=True)
-        return tokenizer.decode(response_ids.squeeze(0), skip_special_tokens=False)
+        new_tokens = response_ids[0][inputs.shape[1]:]
+        return tokenizer.decode(new_tokens.tolist(), skip_special_tokens=True).strip()
 

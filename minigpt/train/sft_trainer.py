@@ -94,6 +94,8 @@ def main():
                             max_lines=sft_max_lines)
     print(f"[sft] dataset lines={len(ds)} max_len={max_len}") if rank0 else None
     train_set, eval_set, test_set = split_dataset(ds, 0.98, 0.01)
+    if len(train_set) == 0 or len(eval_set) == 0:
+        raise RuntimeError("SFT 数据过少（train/eval 为空），请调大 --data_max_lines 或换更大的数据文件")
     collator = create_batch_collator(tokenizer)
 
     train_args = {
@@ -117,7 +119,21 @@ def main():
     if rank0:
         try:
             from torch.utils.tensorboard import SummaryWriter
-            trainer.set_writer(SummaryWriter(os.path.join(pc.output_dir, "tensorboard")))
+            from minigpt.train.metrics import MetricsLogger
+            writer = SummaryWriter(os.path.join(pc.output_dir, "tensorboard"))
+            trainer.set_writer(writer)
+            trainer.tokenizer = tokenizer
+            trainer.metrics = MetricsLogger(
+                writer, model, tokenizer=tokenizer, device=device,
+                log_hist_every=tc.log_hist_every, log_hist_max_numel=tc.log_hist_max_numel,
+                log_embedding_every=tc.log_embedding_every,
+                projector_max_tokens=tc.projector_max_tokens,
+                log_attention_every=tc.log_attention_every, log_graph=tc.log_graph,
+                log_samples_every=tc.log_samples_every,
+                sample_max_new_tokens=tc.sample_max_new_tokens,
+                sample_prompts=[x for x in (tc.sample_prompts or "").split("|") if x],
+            )
+            print(f"[sft] tensorboard metrics enabled")
         except Exception as exc:  # noqa: BLE001
             print(f"[sft] tensorboard disabled: {exc}")
     trainer.set_seed(tc.seed)
@@ -140,7 +156,7 @@ def main():
             prompt = build_chat(tokenizer, text)
             ids = torch.tensor([tokenizer.encode(prompt)]).to(device)
             out = model.generate(ids, 100, tokenizer.eos_token_id, use_kv_cache=False)
-            resp = tokenizer.decode(out[0][ids.shape[1]:].tolist(), skip_special_tokens=False).strip()
+            resp = tokenizer.decode(out[0][ids.shape[1]:].tolist(), skip_special_tokens=True).strip()
             lines.append(f"用户: {text}\n模型: {resp}\n")
             print(f"用户: {text}\n模型: {resp}\n", flush=True)
         with open(os.path.join(pc.output_dir, "sample.txt"), "w", encoding="utf-8") as f:

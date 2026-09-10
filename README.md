@@ -201,6 +201,7 @@ git clone https://github.com/golfxiao/ScratchLLMStepByStep.git
 
 仓库除教学 notebook 外，提供一套按生产规范组织的训练/推理/验证链路（配置集中化、CLI 覆盖、
 DDP/torchrun、AMP+梯度累积、checkpoint/RNG 恢复、tensorboard、采样推理、pytest）。
+packages 级说明与**训练过程指标（标量/直方图/图像/模型图/嵌入投影/文本）**、**思考模式（CoT）** 详见 [`minigpt/README.md`](./minigpt/README.md)。
 
 ### 配置
 - `minigpt/config.py`：`ModelConfig / DataConfig / TrainConfig / PathConfig` 默认值全部基于仓库根自动定位；
@@ -250,3 +251,35 @@ pytest tests/ -q        # 数据管线 / 采样 / config / 模型 / trainer 单�
 - `models/tokenizer_qwen2`：从 ModelScope 获取的 Qwen2.5-0.5B tokenizer（151,665 词表，现代中文 BPE，
   自带 `<|im_start|>/<|im_end|>` chat 模板），训练侧由此推导词表大小；默认启用输入/输出嵌入权重共享（`--model_tie_word_embeddings`）。
 - RTX 20 系（Turing）不支持 FlashAttention-2，默认 `flash_attn=False`。
+
+## 🏋️ 实测训练结果（单卡 RTX 2060 6GB，2026-09）
+
+### 分词器取舍（实测吞吐驱动）
+本机实测不同词表下 `512/10/8/ctx512` 的步耗与吞吐：
+
+| tokenizer | vocab | 单步(s) | 吞吐(tok/s) | 说明 |
+|---|---|---|---|---|
+| Qwen2.5（modelscope 下载） | 151,665 | ~2.01 | ~2.0k | 6GB 卡一 epoch(~77M tokens) 需 ~10h，不可行 |
+| 本仓库重训中文 BPE（`models/tokenizer_v3`，400k 行语料） | 32,000 | ~0.21 | ~19.3k | 与 notebook 词表 32000 兼容，采用 ✅ |
+
+结论：模型词表由 tokenizer 推导（config 可切回 Qwen2.5 在任何更大显存机器上使用）。
+
+### 产物
+- 预训练：`models/checkpoints/pretrain_v1_512/`
+  - 语料：600,000 行 → `dataset/bins/pretrain_v3_600k.bin`（67.7M tokens，uint16+meta）
+  - 模型：384→实际 512/10/8，47.9M 参数，ctx512，嵌入共享，fp16+scaler，3 epochs / 49,509 步
+  - 结果：eval_loss ≈ 3.51（perplexity ≈ 33.3）；周期 checkpoint-{9000,18000,27000,36000,45000}.pth、
+    `final.pt`（含 config）、tensorboard/、metrics.json、sample.txt
+- SFT：`models/checkpoints/sft_v1_512/`
+  - 数据：deepctrl `sft_data_zh.jsonl` 前 40,000 条，lr=2e-5，1 epoch / 4,900 步
+  - 结果：`final.pt`、metrics.json、`final_samples.txt`（指令问答示例）
+
+### 生成示例（SFT 后，温度0.8/top-k50/top-p0.92）
+```
+用户: 什么是AI？
+模型: AI（人工智能）是一种模拟人类智能的技术，它允许计算机执行特定的任务，
+      例如语音识别、图像识别、自然语言处理、机器翻译、智能控制等。……
+用户: 用一句话解释机器学习。
+模型: 机器学习是人工智能的一个分支，它让计算机从数据中学习，并根据规律进行预测和决策。
+```
+更多见 `models/checkpoints/sft_v1_512/final_samples.txt`。

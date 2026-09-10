@@ -1,0 +1,149 @@
+"""思考模式评测：在可验证的算术/应用题留出集上对比"关闭思考"与"开启思考"的准确率。
+
+用法：
+    python scripts/eval_thinking.py --checkpoint models/checkpoints/sft_cot_v1/final.pt \
+        --tokenizer-dir models/tokenizer_v3 --eval-jsonl dataset/sft/cot_eval_zh.jsonl \
+        --n 60 [--temperature 0] [--thinking-max-tokens 120] [--output result.json]
+"""
+import argparse
+import json
+import os
+import re
+import sys
+import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+import torch  # noqa: E402
+from transformers import AutoTokenizer  # noqa: E402
+
+from minigpt.model.generation import generate_with_thinking  # noqa: E402
+from minigpt.model.transformer import GPTConfig, MiniGPT  # noqa: E402
+
+NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def extract_answer(text, default=""):
+    """优先取 '最终答案：' 之后的数字，否则取最后一个数字。"""
+    if "最终答案：" in text:
+        tail = text.split("最终答案：")[-1]
+        m = NUM_RE.search(tail)
+        if m:
+            return m.group(0)
+    nums = NUM_RE.findall(text)
+    return nums[-1] if nums else default
+
+
+def norm(x):
+    try:
+        return f"{float(x):.1f}"
+    except (TypeError, ValueError):
+        return str(x)
+
+
+def plain_generate(model, tokenizer, question, device, max_new_tokens, temperature, seed,
+                   repetition_penalty=1.0):
+    prompt = tokenizer.apply_chat_template([{"role": "user", "content": question}],
+                                           tokenize=False, add_generation_prompt=True)
+    ids = torch.tensor([tokenizer.encode(prompt)]).to(device)
+    torch.manual_seed(seed)
+    kw = dict(repetition_penalty=repetition_penalty)
+    if temperature > 0:
+        kw.update(do_sample=True, temperature=temperature, top_k=50, top_p=0.92)
+    out = model.generate(ids, max_new_tokens, tokenizer.eos_token_id, use_kv_cache=False, **kw)
+    return tokenizer.decode(out[0][ids.shape[1]:].tolist(), skip_special_tokens=True).strip()
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--checkpoint", required=True)
+    ap.add_argument("--tokenizer-dir", default="models/tokenizer_v3")
+    ap.add_argument("--eval-jsonl", default="dataset/sft/cot_eval_zh.jsonl")
+    ap.add_argument("--n", type=int, default=60)
+    ap.add_argument("--max-new-tokens", type=int, default=80)
+    ap.add_argument("--thinking-max-tokens", type=int, default=120)
+    ap.add_argument("--temperature", type=float, default=0.0, help="0=贪心（推荐用于准确率对比）")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--repetition-penalty", type=float, default=1.0,
+                    help="贪心做算术评测建议 1.0；>1 会惩罚重复数字而破坏结果")
+    ap.add_argument("--strategies", default="plain,single,two-phase",
+                    help="要评测的思考策略（逗号分隔）")
+    ap.add_argument("--output", default=None)
+    args = ap.parse_args()
+
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_dir)
+    ck = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    cfg = ck.get("config") or {}
+    keys = ("emb_dim", "n_layers", "n_heads", "context_length", "drop_rate", "qkv_bias",
+            "flash_attn", "tie_word_embeddings", "use_swiglu", "use_checkpoint")
+    kws = {k: cfg[k] for k in keys if k in cfg}
+    kws["vocab_size"] = len(tokenizer)
+    model = MiniGPT(GPTConfig(**kws)).to(device).eval()
+    model.load_state_dict(ck["model_state"])
+
+    rows = []
+    with open(args.eval_jsonl, encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                rows.append(json.loads(line))
+    rows = rows[: args.n]
+
+    strategies = [s.strip() for s in args.strategies.split(",") if s.strip()]
+    stats = {s: 0 for s in strategies}
+    details = []
+    t0 = time.time()
+    for i, row in enumerate(rows):
+        q = row["instruction"]
+        gold = extract_answer(row["output"])
+        plain = plain_generate(model, tokenizer, q, device, args.max_new_tokens,
+                               args.temperature, args.seed + i, args.repetition_penalty)
+        p_pred = extract_answer(plain)
+        row_detail = {"q": q, "gold": gold, "plain": plain[:120], "plain_pred": p_pred,
+                      "plain_ok": norm(p_pred) == norm(gold)}
+        if "plain" in strategies:
+            stats["plain"] += row_detail["plain_ok"]
+        for strat in [s for s in strategies if s != "plain"]:
+            res = generate_with_thinking(
+                model, tokenizer, q, strategy=strat,
+                max_new_tokens=args.max_new_tokens,
+                thinking_max_tokens=args.thinking_max_tokens, hide_thinking=True,
+                do_sample=args.temperature > 0, temperature=max(args.temperature, 1e-6),
+                top_k=50, top_p=0.92, repetition_penalty=args.repetition_penalty,
+                device=device)
+            pred = extract_answer(res["answer"])
+            ok = norm(pred) == norm(gold)
+            stats[strat] += ok
+            row_detail[f"{strat}_pred"] = pred
+            row_detail[f"{strat}_ok"] = ok
+            row_detail[f"{strat}_thinking"] = res["thinking"][:120]
+            row_detail[f"{strat}_answer"] = res["answer"][:120]
+        details.append(row_detail)
+        if (i + 1) % 10 == 0:
+            print(f"[eval] {i+1}/{len(rows)} | " + " | ".join(f"{k} {v}" for k, v in stats.items()))
+
+    n = len(rows)
+    result = {
+        "n": n,
+        "accuracy": {k: round(v / n, 4) for k, v in stats.items()},
+        "accuracy_plain": round(stats.get("plain", 0) / n, 4),
+        "accuracy_thinking": round(stats.get("single", stats.get("two-phase", 0)) / n, 4),
+        "temperature": args.temperature,
+        "seconds": round(time.time() - t0, 1),
+        "checkpoint": args.checkpoint,
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print("\n--- 样例（前 3 条）---")
+    for d in details[:3]:
+        extra = " ".join(f"{k}={d.get(k)}" for k in d if k.endswith("_pred"))
+        print(f"题目: {d['q']}\n  金标: {d['gold']} | {extra}\n"
+              f"  思考: {d.get('single_thinking') or d.get('two-phase_thinking','')}\n"
+              f"  回答: {d.get('single_answer') or d.get('two-phase_answer','')}\n")
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            json.dump({"summary": result, "details": details}, f, ensure_ascii=False, indent=2)
+        print(f"[eval] saved -> {args.output}")
+
+
+if __name__ == "__main__":
+    main()

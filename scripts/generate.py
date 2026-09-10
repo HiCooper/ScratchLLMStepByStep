@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import torch  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
+from minigpt.model.generation import generate_with_thinking  # noqa: E402
 from minigpt.model.transformer import GPTConfig, MiniGPT  # noqa: E402
 
 
@@ -63,6 +64,16 @@ def main():
     ap.add_argument("--top-p", type=float, default=None)
     ap.add_argument("--repeat-penalty", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--thinking", action="store_true",
+                    help="思考模式：两阶段『先逐步分析，再给最终答案』")
+    ap.add_argument("--thinking-strategy", choices=["single", "two-phase"], default="single",
+                    help="single=一次生成思考+答案（推荐）；two-phase=先思考到标记再作答")
+    ap.add_argument("--thinking-max-tokens", type=int, default=120,
+                    help="思考段最大 token 数（思考预算）")
+    ap.add_argument("--hide-thinking", action="store_true",
+                    help="只显示最终答案，隐藏思考过程（思考仍在内部生成）")
+    ap.add_argument("--keep-special-tokens", action="store_true",
+                    help="保留 <|im_end|> 等特殊 token（默认去除，仅用于调试）")
     ap.add_argument("--output-file", default=None)
     args = ap.parse_args()
 
@@ -83,16 +94,32 @@ def main():
 
     lines = []
     def run_one(text):
+        t0 = time.time()
+        if args.thinking:   # 思考模式：两阶段解码（先思考后作答）
+            res = generate_with_thinking(
+                model, tokenizer, text, chat=args.chat,
+                strategy=args.thinking_strategy,
+                max_new_tokens=args.max_new_tokens,
+                thinking_max_tokens=args.thinking_max_tokens,
+                hide_thinking=args.hide_thinking,
+                do_sample=args.do_sample, temperature=args.temperature,
+                top_k=args.top_k, top_p=args.top_p,
+                repetition_penalty=args.repeat_penalty,
+                use_kv_cache=False, device=device)
+            print(f"[generate] 耗时 {time.time()-t0:.1f}s (thinking)")
+            return res["display"]
         prompt = build_prompt(tokenizer, text, args.chat)
         ids = torch.tensor([tokenizer.encode(prompt)]).to(device)
-        t0 = time.time()
         out = model.generate(ids, args.max_new_tokens, tokenizer.eos_token_id,
                              do_sample=args.do_sample, temperature=args.temperature,
                              top_k=args.top_k, top_p=args.top_p,
                              repetition_penalty=args.repeat_penalty,
                              use_kv_cache=False)
         gen = out[0][ids.shape[1]:]
-        resp = tokenizer.decode(gen.tolist(), skip_special_tokens=False).strip()
+        # 默认去掉 <|im_end|> 等特殊 token（模型用它在 eos 处结束回合，是预期行为）；
+        # 调试时可用 --keep-special-tokens 查看原始序列
+        resp = tokenizer.decode(gen.tolist(),
+                                skip_special_tokens=not args.keep_special_tokens).strip()
         print(f"[generate] 耗时 {time.time()-t0:.1f}s")
         return resp
 
