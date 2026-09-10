@@ -108,6 +108,8 @@ NPROC=4 bash scripts/pretrain_start.sh --paths_output_dir models/checkpoints/pre
 | `scripts/report_training.py` | 汇总全部 run/评测 → Markdown 报告（ppl 对比、思考模式准确率、样例；`--json` 供 agent 解析） |
 | `scripts/train_pretrain_resilient.sh` | 自愈长训（崩溃自动续训；环境变量可覆盖 OUT_DIR/DATA_BIN/PRESET_ARGS/TARGET_STEPS/NPROC） |
 | `scripts/checkpoint_janitor.sh` | 每目录保留最近 N 个 checkpoint（防磁盘写满） |
+| `scripts/run_downstream.sh` | 一键下游：SFT → CoT easy → CoT hard → 评测（自动优先 `best.pt`） |
+| `scripts/run_downstream_evals.sh` | **只跑评测/出样**（4a~4d），可单独重跑；`TAG=... bash ...` |
 | `scripts/run_downstream.sh`、`wait_and_run_downstream.sh` | SFT→CoT→评测自动接力 |
 | `tests/` | `pytest tests/ -q`（24 passed, 1 skipped） |
 | `minigpt/README.md` | 指标面板、吞吐、看板、思考模式与实测结果 |

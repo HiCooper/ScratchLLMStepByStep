@@ -123,6 +123,8 @@ class Trainer:
             "optimizer_state": optimizer.state_dict(),
             "epoch": epoch,
             "step": step,
+            "best_eval_loss": self.best_eval_loss,
+            "best_step": self.best_step,
             "scaler_state": self.scaler.state_dict() if self.scaler is not None else None,
             "rng_state": {
                 "torch": torch.get_rng_state(),
@@ -146,6 +148,10 @@ class Trainer:
 
         self.step = checkpoint.get('step', 0)
         last_epoch = checkpoint.get('epoch', 0)
+        # 续训时恢复"历史最优"记录，避免 best.pt 覆盖后指标从 inf 重新起算
+        if checkpoint.get("best_eval_loss") is not None:
+            self.best_eval_loss = float(checkpoint["best_eval_loss"])
+            self.best_step = checkpoint.get("best_step")
         # 恢复混合精度缩放器与随机数状态，保证续训可复现
         if self.scaler is not None and checkpoint.get("scaler_state") is not None:
             self.scaler.load_state_dict(checkpoint["scaler_state"])
