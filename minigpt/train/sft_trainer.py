@@ -24,6 +24,7 @@ from minigpt.config import (DataConfig, ModelConfig, TrainConfig, PathConfig,
                             add_cli_overrides, build_run_config, dump_run_config)
 from minigpt.data.sft_dataset import (InstructionDataset, create_batch_collator,
                                       split_dataset)
+from minigpt.model.checkpoint import model_kwargs_from_checkpoint
 from minigpt.model.transformer import GPTConfig, MiniGPT
 from minigpt.train.trainer import Trainer
 
@@ -62,16 +63,14 @@ def main():
     sft_jsonl = args.sft_jsonl or dc.sft_dataset
     max_len = args.data_max_len
 
-    # 架构：优先继承预训练 checkpoint 的 config，未提供时用 CLI/默认模型配置
+    # 架构：优先继承预训练 checkpoint 的 config；缺失时按权重形状反推；最后才用 CLI/默认配置
     if args.pretrain:
         base = torch.load(args.pretrain, map_location="cpu", weights_only=False)
-        cfg_dict = base.get("config") or {}
+        kws, inferred = model_kwargs_from_checkpoint(base, vocab_size=len(tokenizer))
+        if inferred and rank0:
+            print(f"[sft] {args.pretrain} 未携带 config，已按权重形状推断结构：{kws}")
     else:
-        base, cfg_dict = None, {}
-    kws = {k: cfg_dict[k] for k in
-           ("emb_dim", "n_layers", "n_heads", "context_length", "drop_rate",
-            "qkv_bias", "flash_attn", "tie_word_embeddings", "use_swiglu",
-            "use_checkpoint") if k in cfg_dict}
+        base, kws = None, {}
     for k, v in (("emb_dim", mc.emb_dim), ("n_layers", mc.n_layers),
                  ("n_heads", mc.n_heads), ("context_length", mc.context_length)):
         kws.setdefault(k, v)
@@ -79,7 +78,13 @@ def main():
     gpt = GPTConfig(**kws)
     model = MiniGPT(gpt)
     if base is not None:
-        model.load_state_dict(base["model_state"])
+        try:
+            model.load_state_dict(base["model_state"])
+        except RuntimeError as exc:
+            raise SystemExit(
+                f"加载 {args.pretrain} 权重失败：{exc}\n"
+                f"推断结构 {kws}；请确认 --data_tokenizer_dir 与 checkpoint 词表一致。"
+            ) from exc
     if rank0:
         print(f"[sft] vocab={len(tokenizer)} params={sum(p.numel() for p in model.parameters())/1e6:.1f}M "
               f"arch={kws['emb_dim']}/{kws['n_layers']}/{kws['n_heads']}/ctx{kws['context_length']}")
@@ -106,6 +111,8 @@ def main():
         "save_strategy": "step",
         "save_steps": tc.save_steps,
         "save_best": tc.save_best,
+        "reset_step": tc.reset_step,
+        "extra_steps": tc.extra_steps,
         "num_train_epochs": tc.epochs,
         "max_steps": tc.max_steps,
         "gradient_accumulation_steps": tc.grad_accumulation_steps,
@@ -138,6 +145,8 @@ def main():
         except Exception as exc:  # noqa: BLE001
             print(f"[sft] tensorboard disabled: {exc}")
     trainer.set_seed(tc.seed)
+    # 每个 checkpoint（含 best.pt / final.pt）都带模型 config，推理与评测脚本才能正确重建结构
+    trainer.extra_ckpt = gpt.to_dict()
     trainer.set_dataset(train_set, eval_set, collator)
     trainer.train()
 

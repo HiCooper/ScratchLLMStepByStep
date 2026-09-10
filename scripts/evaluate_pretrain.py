@@ -22,6 +22,7 @@ from transformers import AutoTokenizer  # noqa: E402
 from torch.utils.data import DataLoader, Subset  # noqa: E402
 
 from minigpt.data.pretrain_dataset import TokenBinDataset  # noqa: E402
+from minigpt.model.checkpoint import build_model_from_checkpoint
 from minigpt.model.transformer import GPTConfig, MiniGPT  # noqa: E402
 
 
@@ -35,21 +36,11 @@ def main():
     ap.add_argument("--output", default=None)
     args = ap.parse_args()
 
-    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    cfg_dict = ckpt.get("config")
-    if not cfg_dict:
-        raise SystemExit("checkpoint 缺 config")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_dir)
-    kws = {k: cfg_dict[k] for k in
-           ("emb_dim", "n_layers", "n_heads", "context_length",
-            "drop_rate", "qkv_bias", "flash_attn", "tie_word_embeddings",
-            "use_swiglu", "use_checkpoint") if k in cfg_dict}
-    kws["vocab_size"] = len(tokenizer)  # 以实际 tokenizer 词表为准
-    gpt = GPTConfig(**kws)
-    model = MiniGPT(gpt)
-    model.load_state_dict(ckpt["model_state"])
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    model.to(device).eval()
+    # 优先用 checkpoint 自带 config，缺失则按权重形状反推（兼容 best.pt/周期 checkpoint 等老产物）
+    model, ckpt, kws = build_model_from_checkpoint(args.checkpoint, tokenizer=tokenizer, device=device)
+    gpt = model.config
 
     ds = TokenBinDataset(args.bin, gpt.context_length)
     if args.max_rows and args.max_rows < len(ds):

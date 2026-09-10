@@ -216,6 +216,7 @@ python scripts/parquet_to_jsonl.py   --src dataset/IndustryCorpus2_computer_prog
 python scripts/build_pretrain_bin.py build --corpus-jsonl dataset/domain/code_corpus.jsonl   --tokenizer-dir models/tokenizer_v3 --out-bin dataset/bins/code_domain.bin --max-lines 0
 
 # 3) 从现有基座增量续训（低 lr，1 epoch；混入语料已在步骤 1 完成）
+#    ⚠️ 必须让 RESET_STEP 生效（默认 auto：从 FALLBACK_CKPT 起步时自动 --train_reset_step True）
 OUT_DIR=models/checkpoints/pretrain_domain_code DATA_BIN=dataset/bins/code_domain.bin \
 TARGET_STEPS=<按预算换算> PRESET_ARGS="--model_emb_dim 512 --model_n_layers 10 --model_n_heads 8 \
   --model_context_length 512 --train_batch_size 8 --train_learning_rate 1e-4 --train_warmup_steps 100 \
@@ -227,7 +228,15 @@ setsid nohup bash scripts/train_pretrain_resilient.sh > models/checkpoints/pretr
 ```
 要点：混入通用语料 10–20% 防灾难性遗忘；lr 用预训练的 1/5~1/10；长文档被 ctx 切窗属正常；
 过滤 `quality_score`/`max_line_length` 可显著提纯；若目标是"思考模式"，数学语料（IndustryCorpus2_mathematics_statistics_high）
-比代码更适合，可从中抽取题目构造 CoT 指令数据。
+比代码更适合，可从中抽取题目构造 CoT 指令题。
+
+**增量续训最大的坑（真实踩过，务必检查）**：`--train_max_steps` 是**绝对步数**。
+从 211000 步的基座"再训 26847 步"如果直接传 `--train_max_steps 26847`，trainer 加载后
+`step=211000 ≥ max_steps` 会**立刻判定训练完成**（几十秒产出 final.pt，实际一步没训）；
+即使不退出，`cosine` 调度与 `epoch skip` 也会因为步数基数过大而失效。
+正确做法是加 `--train_reset_step True`（`train_pretrain_resilient.sh` 的 `RESET_STEP=auto` 已默认处理：
+从 `FALLBACK_CKPT` 起步时归零，从本 run 自己的 checkpoint 恢复时保留步数）。
+启动后**务必核对**日志里出现 `reset_step=True：步数 211000 -> 0`，且第一条 loss 在合理区间。
 
 ## 8. 参考
 

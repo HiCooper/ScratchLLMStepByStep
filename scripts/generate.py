@@ -19,25 +19,14 @@ import torch  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from minigpt.model.generation import generate_with_thinking  # noqa: E402
-from minigpt.model.transformer import GPTConfig, MiniGPT  # noqa: E402
+from minigpt.model.checkpoint import build_model_from_checkpoint  # noqa: E402
 
 
 def load_model(checkpoint_path, tokenizer):
-    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    if not isinstance(ckpt, dict) or "model_state" not in ckpt:
-        raise ValueError(f"checkpoint 缺少 model_state 字段: {checkpoint_path}")
-    cfg_dict = ckpt.get("config")
-    if not cfg_dict:
-        raise ValueError(f"checkpoint 缺少 config 字段（生产 checkpoint 由 pretrainer.py 产出）")
-    keys = {k: v for k, v in cfg_dict.items()}
-    keys["vocab_size"] = len(tokenizer)
-    gpt = GPTConfig(**{k: keys[k] for k in
-                       ("emb_dim", "n_layers", "n_heads", "context_length", "vocab_size",
-                        "drop_rate", "qkv_bias", "flash_attn", "tie_word_embeddings",
-                        "use_swiglu", "use_checkpoint") if k in keys})
-    model = MiniGPT(gpt)
-    model.load_state_dict(ckpt["model_state"])
-    model.eval()
+    """加载 checkpoint：优先用其自带 config，缺失则按权重形状反推（兼容老产物）。"""
+    model, ckpt, kws = build_model_from_checkpoint(checkpoint_path, tokenizer=tokenizer)
+    print(f"[ckpt] arch={kws.get('emb_dim')}/{kws.get('n_layers')}/{kws.get('n_heads')} "
+          f"ctx={kws.get('context_length')} vocab={kws.get('vocab_size')}")
     return model, ckpt.get("step"), ckpt.get("eval_loss")
 
 

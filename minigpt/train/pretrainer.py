@@ -84,6 +84,8 @@ def main():
         "save_strategy": "step",
         "save_steps": tc.save_steps,
         "save_best": tc.save_best,
+        "reset_step": tc.reset_step,
+        "extra_steps": tc.extra_steps,
         "num_train_epochs": tc.epochs,
         "max_steps": tc.max_steps,
         "gradient_accumulation_steps": tc.grad_accumulation_steps,

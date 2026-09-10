@@ -18,7 +18,7 @@ import torch  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from minigpt.model.generation import generate_with_thinking  # noqa: E402
-from minigpt.model.transformer import GPTConfig, MiniGPT  # noqa: E402
+from minigpt.model.checkpoint import build_model_from_checkpoint  # noqa: E402
 
 NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
@@ -73,14 +73,10 @@ def main():
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_dir)
-    ck = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    cfg = ck.get("config") or {}
-    keys = ("emb_dim", "n_layers", "n_heads", "context_length", "drop_rate", "qkv_bias",
-            "flash_attn", "tie_word_embeddings", "use_swiglu", "use_checkpoint")
-    kws = {k: cfg[k] for k in keys if k in cfg}
-    kws["vocab_size"] = len(tokenizer)
-    model = MiniGPT(GPTConfig(**kws)).to(device).eval()
-    model.load_state_dict(ck["model_state"])
+    # 优先用 checkpoint 自带 config，缺失（如老版本 best.pt / 周期 checkpoint）则按权重形状反推
+    model, ck, kws = build_model_from_checkpoint(args.checkpoint, tokenizer=tokenizer, device=device)
+    print(f"[ckpt] {args.checkpoint} arch={kws.get('emb_dim')}/{kws.get('n_layers')}/"
+          f"{kws.get('n_heads')} ctx={kws.get('context_length')}")
 
     rows = []
     with open(args.eval_jsonl, encoding="utf-8") as f:

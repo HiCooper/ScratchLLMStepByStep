@@ -57,7 +57,9 @@ class TrainConfig:
     train_ratio: float = 0.998      # 兼容旧字段（新入口用 eval_ratio）
     weight_decay: float = 0.01
     grad_accumulation_steps: int = 1
-    max_steps: int = 0              # 0 => epochs*每epoch步数
+    max_steps: int = 0              # 优化步上限（绝对值；0 => epochs*每epoch步数）
+    reset_step: bool = False        # 续训时把优化步计数归零：领域增量续训必须开（见 SKILL.md §7.5）
+    extra_steps: int = 0            # 从恢复点起再训 N 步（隐含步数归零；与 max_steps 二选一）
     warmup_steps: int = 300
     eval_steps: int = 500
     save_steps: int = 2000

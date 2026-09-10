@@ -58,6 +58,9 @@ class Trainer:
         self.writer = None                       # tensorboard SummaryWriter（可选）
         self.grad_clip = float(train_args.get("grad_clip", 1.0))
         self.max_updates = int(train_args.get("max_steps", 0) or 0)
+        # 增量续训：reset_step 让调度/skip/max_steps 全部相对新 run 起算（见 train()）
+        self.reset_step = bool(train_args.get("reset_step", False))
+        self.extra_steps = int(train_args.get("extra_steps", 0) or 0)
         self.effective_max = 0                   # train() 中根据 loader 确定
         self.best_eval_loss = float("inf")
         self.best_step = None
@@ -409,8 +412,6 @@ class Trainer:
         self._init_distributed_mode()
         # 初始化数据加载器
         self._init_dataloader()
-        # 总更新步数（max_steps 生效时截断训练）
-        self.effective_max = self.max_updates if self.max_updates > 0 else self.total_steps
         # 初始化梯度缩放器
         self._init_grad_scaler()
         # 将模型移动到指定设备上
@@ -418,6 +419,22 @@ class Trainer:
         # 从指定的checkpoint恢复训练状态
         if self.last_checkpoint_path:
             last_epoch = self._load_from_checkpoint()
+        # ---- 增量续训（领域自适应）----
+        # 默认沿用 checkpoint 里的绝对步数；reset_step（或 extra_steps，见下）时把步数归零，
+        # 否则"从 211000 步的基座再训 26847 步"会被解读成 max_steps=26847 而直接判定已训完，
+        # 且 cosine 调度/epoch skip 也会立刻失效（这是踩过的真实坑）。
+        if self.reset_step or self.extra_steps > 0:
+            print(f"[trainer] 步数归零（reset_step={self.reset_step}, extra_steps={self.extra_steps}）："
+                  f"{self.step} -> 0（模型/优化器权重保留）") if self.verbose else None
+            self.step = 0
+            last_epoch = 0
+            self.best_eval_loss = float("inf")
+            self.best_step = None
+        # 总更新步数：extra_steps 语义 = "从现在起再训 N 步"
+        if self.extra_steps > 0:
+            self.effective_max = self.step + self.extra_steps
+        else:
+            self.effective_max = self.max_updates if self.max_updates > 0 else self.total_steps
         # 分布式训练需要使用ddp同步模型状态
         if self.ddp:
             self.model = self._wrap_model_with_ddp(self.model, self.local_rank)

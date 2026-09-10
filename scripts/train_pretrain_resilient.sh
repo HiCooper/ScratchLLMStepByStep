@@ -14,6 +14,8 @@
 #   PRESET_ARGS    模型/训练超参串      (见下)
 #   TARGET_STEPS   目标优化步数         (211000)
 #   NPROC          GPU 数（>1 走 torchrun DDP）
+#   RESET_STEP     续训步数是否归零：auto(默认，仅在从 FALLBACK_CKPT 起步时归零) | 1 | 0
+#                  领域增量预训练必须归零，否则"从 211000 步基座再训 N 步"会被当成 max_steps=211000+N 的绝对步数
 #   DRY_RUN=1      只打印将要执行的训练命令，不启动
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -26,6 +28,7 @@ TOKENIZER_DIR="${TOKENIZER_DIR:-models/tokenizer_v3}"
 TARGET_STEPS="${TARGET_STEPS:-211000}"
 NPROC="${NPROC:-1}"
 MAX_RESTARTS="${MAX_RESTARTS:-20}"
+RESET_STEP="${RESET_STEP:-auto}"
 PRESET_ARGS="${PRESET_ARGS:---model_emb_dim 512 --model_n_layers 10 --model_n_heads 8 --model_context_length 512 --train_batch_size 8 --train_learning_rate 6e-4 --train_warmup_steps 200 --train_eval_steps 2000 --train_save_steps 4000 --train_epochs 7 --train_torch_compile True}"
 
 log() { echo "[$(date '+%F %T')] $*"; }
@@ -47,9 +50,17 @@ for attempt in $(seq 1 "$MAX_RESTARTS"); do
   fi
   log "第 $attempt 次启动：nproc=$NPROC resume=${CKPT:-<从头>} target_steps=$TARGET_STEPS"
   log "预设参数: $PRESET_ARGS"
+  # 从"外部基座"起步时把步数归零（领域增量续训），从本 run 自己的 checkpoint 恢复时保留步数
+  if [ "$RESET_STEP" = "1" ] || { [ "$RESET_STEP" = "auto" ] && [ -n "$CKPT" ] && [ "$CKPT" = "$FALLBACK_CKPT" ]; }; then
+    RESET_ARGS="--train_reset_step True"
+    log "步数归零（--train_reset_step True）：本次训练相对目标 $TARGET_STEPS 重新起算"
+  else
+    RESET_ARGS=""
+  fi
+
   if [ "${DRY_RUN:-0}" = "1" ]; then
     echo "[dry-run] ${LAUNCH[*]} --data_tokenizer_dir $TOKENIZER_DIR --data_tokenized_bin $DATA_BIN \\"
-    echo "  --data_eval_ratio 0.001 $PRESET_ARGS --train_max_steps $TARGET_STEPS \\"
+    echo "  --data_eval_ratio 0.001 $PRESET_ARGS --train_max_steps $TARGET_STEPS $RESET_ARGS \\"
     echo "  ${CKPT:+--paths_last_checkpoint_path $CKPT }--paths_output_dir $OUT_DIR"
     exit 0
   fi
@@ -58,14 +69,14 @@ for attempt in $(seq 1 "$MAX_RESTARTS"); do
     "${LAUNCH[@]}" \
       --data_tokenizer_dir "$TOKENIZER_DIR" --data_tokenized_bin "$DATA_BIN" \
       --data_eval_ratio 0.001 $PRESET_ARGS \
-      --train_max_steps "$TARGET_STEPS" \
+      --train_max_steps "$TARGET_STEPS" $RESET_ARGS \
       --paths_last_checkpoint_path "$CKPT" \
       --paths_output_dir "$OUT_DIR" >> "$LOG" 2>&1
   else
     "${LAUNCH[@]}" \
       --data_tokenizer_dir "$TOKENIZER_DIR" --data_tokenized_bin "$DATA_BIN" \
       --data_eval_ratio 0.001 $PRESET_ARGS \
-      --train_max_steps "$TARGET_STEPS" \
+      --train_max_steps "$TARGET_STEPS" $RESET_ARGS \
       --paths_output_dir "$OUT_DIR" >> "$LOG" 2>&1
   fi
   rc=$?
