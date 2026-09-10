@@ -283,3 +283,17 @@ pytest tests/ -q        # 数据管线 / 采样 / config / 模型 / trainer 单�
 模型: 机器学习是人工智能的一个分支，它让计算机从数据中学习，并根据规律进行预测和决策。
 ```
 更多见 `models/checkpoints/sft_v1_512/final_samples.txt`。
+
+## 🤖 交给 Agent 自动训练（Skill）
+
+本仓库根目录提供可被 agent 自动发现的 skill：**`skills/minigpt-train/`**（DSH 会扫描 `skills/`、`.dsh/skills/`、`.agents/skills/`）。
+把仓库交给 agent 后，它会：
+
+1. 读 `skills/minigpt-train/SKILL.md` 了解训练流程与决策树；
+2. 运行 `bash skills/minigpt-train/scripts/preflight.sh` 做环境体检（依赖/GPU/显存/磁盘/语料/分词器/服务/单测，输出 JSON）；
+3. 按预算执行 `bash skills/minigpt-train/scripts/pipeline.sh --smoke|--full`：
+   - `--smoke`：约 5 分钟小模型端到端冒烟（含显存守卫）；
+   - `--full`：全量语料 `.bin`（缺则构建）→ 预训练（自愈守护 + `torch.compile` + 空间守护）→ 自动 SFT/CoT/评测 → 看板 `:8099`；
+4. 参考 `references/training-recipes.md`（超参/吞吐/预算换算）与 `references/troubleshooting.md`（OOM/续训/速度/磁盘等排障）自行优化。
+
+无需人工执行脚本；agent 会后台运行长任务、轮询 `scripts/train_dashboard.py --once`，并按 skill 中的报告模板给出产物路径与指标对比。
