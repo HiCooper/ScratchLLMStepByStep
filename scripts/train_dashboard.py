@@ -138,7 +138,8 @@ def snapshot(args):
             "log_size_mb": round(data["size"] / 1e6, 1), "last": last, "rate": rate,
             "eta_min": None if eta_min is None else round(eta_min, 1), "evals": evals[-300:],
             "checkpoints": checkpoints(args.out_dir), "gpu": gpu_info(), "tail": tail,
-            "final_exists": os.path.exists(os.path.join(args.out_dir, "final.pt"))}
+            "final_exists": os.path.exists(os.path.join(args.out_dir, "final.pt")),
+            "best_exists": os.path.exists(os.path.join(args.out_dir, "best.pt"))}
 
 
 def ascii_spark(values, width=64):
@@ -167,6 +168,8 @@ def render_text(s):
         lines.append(f"GPU: util {g['util']}% | mem {g['mem_used']}/{g['mem_total']}MB | temp {g['temp']}C")
     cps = ", ".join(f"{c['name']}({c['mtime']})" for c in s["checkpoints"][-3:])
     lines.append(f"checkpoints: {cps or '—'}")
+    if s["best_exists"]:
+        lines.append("⭐ best.pt 已产出（eval_loss 历史最优，下游/评测优先用它）")
     if s["final_exists"]:
         lines.append("✅ final.pt 已产出（预训练完成）")
     return "\n".join(lines)

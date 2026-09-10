@@ -44,6 +44,7 @@ class Trainer:
         self.eval_loader = None
         self.steps_per_epoch = 0
         self.step = 0
+        self.cur_epoch = 0
         self.total_steps = 0
         self.train_loss_acc = 0
         self.last_grad_norm = 0.0
@@ -59,6 +60,8 @@ class Trainer:
         self.max_updates = int(train_args.get("max_steps", 0) or 0)
         self.effective_max = 0                   # train() 中根据 loader 确定
         self.best_eval_loss = float("inf")
+        self.best_step = None
+        self.save_best = bool(train_args.get("save_best", True))
         self.last_eval_loss = None
         self.final_metrics = {}
         self.extra_ckpt = None   # 附加到每个 checkpoint 的字典（如 config）
@@ -229,7 +232,12 @@ class Trainer:
             + f"steps: {self.step}/{self.total_steps}"
         )
         self.last_eval_loss = eval_loss
-        self.best_eval_loss = min(self.best_eval_loss, eval_loss)
+        if eval_loss < self.best_eval_loss:
+            self.best_eval_loss = eval_loss
+            self.best_step = self.step
+            # 保存"历史最优"权重：小模型训练后期常过拟合，用 best.pt 做下游/评测通常优于 final.pt
+            if self.save_best and self.is_main_process and self.output_dir:
+                self._save_model(os.path.join(self.output_dir, "best.pt"), self.cur_epoch)
         if self.writer is not None and self.metrics is None:
             self.writer.add_scalar("train/loss", train_loss, self.step)
             self.writer.add_scalar("eval/loss", eval_loss, self.step)
@@ -361,6 +369,7 @@ class Trainer:
 
     def _train_epoch(self, cur_epoch):
         assert self.train_loader and self.eval_loader, f"train_loader and eval_loader can't be empty."
+        self.cur_epoch = cur_epoch
         # 从中断的优化器步位置换算回微批索引继续训练（梯度累积下两者相差 accumulation 倍）
         skip_updates = self.step - cur_epoch * self.updates_per_epoch
         skip_micro = skip_updates * self.gradient_accumulation_steps
@@ -429,6 +438,7 @@ class Trainer:
                     "eval_loss": final_eval,
                     "perplexity": float(math.exp(min(final_eval, 80.0))),
                     "best_eval_loss": self.best_eval_loss,
+                    "best_step": self.best_step,
                 }
                 if self.writer is not None:
                     self.writer.add_scalar("eval/final_loss", final_eval, self.step)

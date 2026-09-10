@@ -77,14 +77,19 @@ def collect(cp: str | None = None):
                                  "train_loss": m.get("train_loss"), "eval_loss": m.get("eval_loss"),
                                  "perplexity": m.get("perplexity"),
                                  "best_eval_loss": m.get("best_eval_loss"),
+                                 "best_step": m.get("best_step"),
                                  "params": estimate_params(cfg),
-                                 "final": os.path.exists(os.path.join(os.path.dirname(path), "final.pt"))})
+                                 "final": os.path.exists(os.path.join(os.path.dirname(path), "final.pt")),
+                                 "best": os.path.exists(os.path.join(os.path.dirname(path), "best.pt"))})
     for path in sorted(glob.glob(os.path.join(cp, "sft_*", "metrics.json"))):
         m = load(path) or {}
         data["sft"].append({"run": os.path.basename(os.path.dirname(path)),
                             "step": m.get("step"), "train_loss": m.get("train_loss"),
                             "eval_loss": m.get("eval_loss"),
-                            "final": os.path.exists(os.path.join(os.path.dirname(path), "final.pt"))})
+                            "best_eval_loss": m.get("best_eval_loss"),
+                            "best_step": m.get("best_step"),
+                            "final": os.path.exists(os.path.join(os.path.dirname(path), "final.pt")),
+                            "best": os.path.exists(os.path.join(os.path.dirname(path), "best.pt"))})
     for path in sorted(glob.glob(os.path.join(cp, "eval_*_cot_*.json"))):
         js = load(path)
         if js:
@@ -106,18 +111,38 @@ def collect(cp: str | None = None):
     return data
 
 
+def _best(r: dict) -> str:
+    """best_eval_loss(@step)：老产物没有 best_step 字段时只显示 loss。"""
+    v = r.get("best_eval_loss")
+    if v is None:
+        return "—"
+    st = r.get("best_step")
+    return f"{float(v):.4f}" if st is None else f"{float(v):.4f}@{st}"
+
+
+def _num(v, nd: int = 4) -> str:
+    """统一的数值格式化：None/非数值安全降级为 —。"""
+    try:
+        return f"{float(v):.{nd}f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
 def render(d: dict) -> str:
     L = [f"# MiniGPT 训练报告", "", f"生成时间：{d['time']}", ""]
     L += ["## 1. 预训练 run", "",
           "> 注：各 run 的 eval_loss 来自各自的验证切分（语料/比例可能不同），趋势可比；"
-          "严格的同口径对比见 §2（同一 bin、同一 `--max-rows`）。", "" "| run | step | params | train_loss | eval_loss | perplexity | final.pt |",
-          "|---|---|---|---|---|---|---|"]
+          "严格的同口径对比见 §2（同一 bin、同一 `--max-rows`）。",
+          "`best.pt` 是 eval_loss 历史最优时的权重（小模型后期易过拟合，做下游/评测通常优于 `final.pt`）。", "",
+          "| run | step | params | train_loss | eval_loss | perplexity | best_eval_loss@step | final.pt | best.pt |",
+          "|---|---|---|---|---|---|---|---|---|"]
     for r in d["pretrain"]:
+        best = _best(r)
         L.append(f"| {r['run']} | {r['step']} | {r['params']} | "
-                 f"{r['train_loss']:.4f} | **{r['eval_loss']:.4f}** | {r['perplexity']:.2f} | "
-                 f"{'✅' if r['final'] else '—'} |")
+                 f"{_num(r.get('train_loss'))} | **{_num(r.get('eval_loss'))}** | {_num(r.get('perplexity'), 2)} | "
+                 f"{best} | {'✅' if r['final'] else '—'} | {'✅' if r.get('best') else '—'} |")
     if not d["pretrain"]:
-        L.append("| （暂无） | | | | | | |")
+        L.append("| （暂无） | | | | | | | | |")
 
     L += ["", "## 2. 同切分 perplexity 对比（同一 bin / 同一 --max-rows）", ""]
     if d["ppl"]:
@@ -131,13 +156,15 @@ def render(d: dict) -> str:
     else:
         L.append("（尚未产出：等待 run_downstream.sh 的 4c 阶段）")
 
-    L += ["", "## 3. 下游 SFT / CoT run", "", "| run | step | train_loss | eval_loss | final.pt |",
-          "|---|---|---|---|---|"]
+    L += ["", "## 3. 下游 SFT / CoT run", "",
+          "| run | step | train_loss | eval_loss | best_eval_loss@step | final.pt | best.pt |",
+          "|---|---|---|---|---|---|---|"]
     for r in d["sft"]:
-        L.append(f"| {r['run']} | {r['step']} | {r['train_loss']:.4f} | {r['eval_loss']:.4f} | "
-                 f"{'✅' if r['final'] else '—'} |")
+        best = _best(r)
+        L.append(f"| {r['run']} | {r['step']} | {_num(r.get('train_loss'))} | {_num(r.get('eval_loss'))} | "
+                 f"{best} | {'✅' if r['final'] else '—'} | {'✅' if r.get('best') else '—'} |")
     if not d["sft"]:
-        L.append("| （暂无） | | | | |")
+        L.append("| （暂无） | | | | | | |")
 
     L += ["", "## 4. 思考模式准确率（留出集，贪心 + repetition_penalty=1.0）", ""]
     if d["thinking"]:

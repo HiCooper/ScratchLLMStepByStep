@@ -105,6 +105,7 @@ def main():
         "warmup_steps": tc.warmup_steps,
         "save_strategy": "step",
         "save_steps": tc.save_steps,
+        "save_best": tc.save_best,
         "num_train_epochs": tc.epochs,
         "max_steps": tc.max_steps,
         "gradient_accumulation_steps": tc.grad_accumulation_steps,

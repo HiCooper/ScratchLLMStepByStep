@@ -195,6 +195,9 @@ SFT/CoT：loss 与产物；思考模式 easy/hard 准确率（对照基座）
 - 续训必须带 `--paths_last_checkpoint_path`；RNG 张量加载时会 `.cpu()` 修正。
 - `torch.compile` 只对固定形状（预训练）收益大；SFT 变长序列可能反复重编译。
 - 算术评测 `--repetition-penalty` 必须 1.0。
+- **优先用 `best.pt` 而不是 `final.pt`**：小模型 SFT/CoT 后期过拟合（实测 eval 1.611 → 1.740）。
+  训练器在 eval 创新低时写 `best.pt`（`--train_save_best False` 可关），下游训练/评测/发布都优先取它；
+  只有确实不存在 `best.pt`（老产物）才回退 `final.pt`。
 - 长训练必须跑 `scripts/checkpoint_janitor.sh`；WSL 下注意 C 盘 vhdx 增长。
 - 长任务用 `setsid` 脱离工具进程组；用 `pgrep -af` 与日志校验存活。
 

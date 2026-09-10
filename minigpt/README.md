@@ -65,12 +65,18 @@ python scripts/evaluate_pretrain.py --checkpoint models/checkpoints/pretrain_v1_
 output_dir/
 ├── config.json                # 本次运行完整配置
 ├── checkpoint-{step}.pth      # 周期 checkpoint：model/optimizer/scaler/RNG/config
+├── best.pt                    # eval_loss 历史最优时的权重（--train_save_best False 可关）
 ├── final.pt                   # 主进程最终保存（同样含 config，可直接用于推理）
 ├── tensorboard/               # 指标事件（见下）
-├── metrics.json               # 最终指标（step/epoch/train_loss/eval_loss/perplexity/best_eval_loss）
+├── metrics.json               # 最终指标（step/epoch/train_loss/eval_loss/perplexity/best_eval_loss/best_step）
 └── sample.txt                 # 训练后采样输出
 ```
 续训：`--paths_last_checkpoint_path output_dir/checkpoint-2000.pth`（自动恢复优化器、混合精度缩放器与随机数状态）。
+
+> **best.pt vs final.pt（生产经验）**：47.9M 的小模型在 SFT/CoT 后期几乎必然过拟合——实测 CoT easy
+> `best_eval_loss=1.611`（约 step 5k）而 `final.pt` 已升到 `1.740`。因此训练器在每次 eval 创新低时额外写
+> `best.pt`；做下游训练、思考模式评测、对外发布时**优先用 `best.pt`**（同结构、同 config，可直接替换 `final.pt`）。
+> 每个 checkpoint 都含优化器 + RNG 状态（单文件 ~585MB），用 `scripts/checkpoint_janitor.sh` 控盘。
 
 ---
 

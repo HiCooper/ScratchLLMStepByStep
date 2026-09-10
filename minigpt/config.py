@@ -61,6 +61,7 @@ class TrainConfig:
     warmup_steps: int = 300
     eval_steps: int = 500
     save_steps: int = 2000
+    save_best: bool = True          # eval_loss 创新低时额外保存 best.pt（用于下游/评测选最优权重）
     log_every: int = 20
     grad_clip: float = 1.0
     mixed_precision_dtype: str = "float16"   # float16 | bfloat16 | none
