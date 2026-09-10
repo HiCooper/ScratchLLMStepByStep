@@ -198,6 +198,32 @@ SFT/CoT：loss 与产物；思考模式 easy/hard 准确率（对照基座）
 - 长训练必须跑 `scripts/checkpoint_janitor.sh`；WSL 下注意 C 盘 vhdx 增长。
 - 长任务用 `setsid` 脱离工具进程组；用 `pgrep -af` 与日志校验存活。
 
+## 7.5 领域增量预训练（如新下载的行业/代码语料）
+
+外部语料（parquet/jsonl）通常是**预训练语料**而不是指令数据，正确姿势是「增量预训练 → 再 SFT」，
+否则直接 SFT 会把模型训成续写器、破坏对话能力。
+
+```bash
+# 1) parquet → jsonl（过滤 + 混入通用语料防遗忘 + token 估算）
+python scripts/parquet_to_jsonl.py   --src dataset/IndustryCorpus2_computer_programming_code_high   --out dataset/domain/code_corpus.jsonl   --min-chars 300 --max-chars 8000 --max-line-length 500 --min-quality 3.0   --mix-jsonl dataset/pretrain_t2t_mini.jsonl --mix-ratio 0.15 --mix-limit 200000
+
+# 2) 建 bin（自动 uint16/uint32 + meta）
+python scripts/build_pretrain_bin.py build --corpus-jsonl dataset/domain/code_corpus.jsonl   --tokenizer-dir models/tokenizer_v3 --out-bin dataset/bins/code_domain.bin --max-lines 0
+
+# 3) 从现有基座增量续训（低 lr，1 epoch；混入语料已在步骤 1 完成）
+OUT_DIR=models/checkpoints/pretrain_domain_code DATA_BIN=dataset/bins/code_domain.bin \
+TARGET_STEPS=<按预算换算> PRESET_ARGS="--model_emb_dim 512 --model_n_layers 10 --model_n_heads 8 \
+  --model_context_length 512 --train_batch_size 8 --train_learning_rate 1e-4 --train_warmup_steps 100 \
+  --train_eval_steps 1000 --train_save_steps 4000 --train_epochs 2 --train_torch_compile True" \
+FALLBACK_CKPT=models/checkpoints/pretrain_v2_full/final.pt \
+setsid nohup bash scripts/train_pretrain_resilient.sh > models/checkpoints/pretrain_domain_code.watchdog.log 2>&1 &
+
+# 4) 领域基座再跑一次 SFT/CoT（复用 §5 命令，--pretrain 指向新的 final.pt）
+```
+要点：混入通用语料 10–20% 防灾难性遗忘；lr 用预训练的 1/5~1/10；长文档被 ctx 切窗属正常；
+过滤 `quality_score`/`max_line_length` 可显著提纯；若目标是"思考模式"，数学语料（IndustryCorpus2_mathematics_statistics_high）
+比代码更适合，可从中抽取题目构造 CoT 指令数据。
+
 ## 8. 参考
 
 - `references/training-recipes.md`：环境预设矩阵、吞吐表、预算↔tokens 换算、多卡公式、CPU 实测。

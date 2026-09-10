@@ -42,6 +42,7 @@ CPU 环境下 agent 的正确做法：跑 `--smoke`/`--full --preset cpu --hours
   SFT/CoT 数据生成：`scripts/build_cot_sft.py --profile easy|hard`。
 - 评测：`scripts/evaluate_pretrain.py`（loss/perplexity，注意 `--max-rows`）、`scripts/eval_thinking.py`（思考模式，`--repetition-penalty 1.0`）。
 - 推理：`scripts/generate.py --chat [--thinking --thinking-strategy single]`。
+- 领域语料（parquet，如 `dataset/IndustryCorpus2_*`）：`scripts/parquet_to_jsonl.py` 转换（可混入通用语料防遗忘）→ 建 bin → 增量续训；**不要**把预训练语料直接拿去做 SFT（见 SKILL.md §7.5）。
 
 ## 硬性约定
 
