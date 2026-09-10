@@ -80,6 +80,9 @@ def checkpoints(out_dir):
 
 def snapshot(args):
     data = parse_log(args.log)
+    wd_log = args.watchdog_log or (args.out_dir.rstrip("/") + ".watchdog.log")
+    wd = parse_log(wd_log) if os.path.exists(wd_log) else {"restarts": 0}
+    data["restarts"] = max(data.get("restarts", 0), wd.get("restarts", 0))
     evals = data["evals"]
     last = evals[-1] if evals else None
     rate = None
@@ -312,6 +315,8 @@ def main():
     ap.add_argument("--port", type=int, default=8099)
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--plot", default=None, help="导出损失走势图 PNG 后退出")
+    ap.add_argument("--watchdog-log", default=None,
+                    help="自愈守护日志（默认 <out-dir>.watchdog.log），用于统计重启次数")
     ap.add_argument("--grad-clip", type=float, default=1.0,
                     help="梯度裁剪阈值：在看板 grad 图上画参考线（与 trainer 的 grad_clip 一致）")
     args = ap.parse_args()
