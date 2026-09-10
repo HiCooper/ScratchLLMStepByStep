@@ -14,6 +14,7 @@
 #   PRESET_ARGS    模型/训练超参串      (见下)
 #   TARGET_STEPS   目标优化步数         (211000)
 #   NPROC          GPU 数（>1 走 torchrun DDP）
+#   DRY_RUN=1      只打印将要执行的训练命令，不启动
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -46,6 +47,12 @@ for attempt in $(seq 1 "$MAX_RESTARTS"); do
   fi
   log "第 $attempt 次启动：nproc=$NPROC resume=${CKPT:-<从头>} target_steps=$TARGET_STEPS"
   log "预设参数: $PRESET_ARGS"
+  if [ "${DRY_RUN:-0}" = "1" ]; then
+    echo "[dry-run] ${LAUNCH[*]} --data_tokenizer_dir $TOKENIZER_DIR --data_tokenized_bin $DATA_BIN \\"
+    echo "  --data_eval_ratio 0.001 $PRESET_ARGS --train_max_steps $TARGET_STEPS \\"
+    echo "  ${CKPT:+--paths_last_checkpoint_path $CKPT }--paths_output_dir $OUT_DIR"
+    exit 0
+  fi
 
   if [ -n "$CKPT" ]; then
     "${LAUNCH[@]}" \

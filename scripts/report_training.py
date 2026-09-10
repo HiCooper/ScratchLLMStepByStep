@@ -17,6 +17,7 @@ import argparse
 import glob
 import json
 import os
+import re
 from datetime import datetime
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -120,9 +121,13 @@ def render(d: dict) -> str:
 
     L += ["", "## 2. 同切分 perplexity 对比（同一 bin / 同一 --max-rows）", ""]
     if d["ppl"]:
-        L += ["| run | eval_loss | perplexity | 评估窗口 |", "|---|---|---|---|"]
-        for k, v in d["ppl"].items():
-            L.append(f"| {k} | {v.get('eval_loss')} | {v.get('perplexity')} | {v.get('rows')} |")
+        items = sorted(d["ppl"].items(), key=lambda kv: (kv[1].get("eval_loss") is None, kv[1].get("eval_loss")))
+        base = items[0][1].get("eval_loss") if items else None
+        L += ["| run | eval_loss | perplexity | 相对首个降低 | 评估窗口 |", "|---|---|---|---|---|"]
+        for k, v in items:
+            el = v.get("eval_loss")
+            delta = "—" if (el is None or base in (None, 0)) else f"{(1 - el / base) * 100:+.1f}%"
+            L.append(f"| {k} | {el} | {v.get('perplexity')} | {delta} | {v.get('rows')} |")
     else:
         L.append("（尚未产出：等待 run_downstream.sh 的 4c 阶段）")
 
@@ -136,11 +141,19 @@ def render(d: dict) -> str:
 
     L += ["", "## 4. 思考模式准确率（留出集，贪心 + repetition_penalty=1.0）", ""]
     if d["thinking"]:
-        L += ["| 评测集 | n | plain | single | two-phase |", "|---|---|---|---|---|"]
+        groups = {}
         for name, js in d["thinking"].items():
-            acc = js.get("accuracy", {}) if isinstance(js, dict) else {}
-            L.append(f"| {name} | {js.get('n')} | {acc.get('plain')} | {acc.get('single')} | "
-                     f"{acc.get('two-phase')} |")
+            m = re.match(r"eval_(?P<tag>.+)_cot_(?P<set>easy|hard)$", name)
+            tag = m.group("tag") if m else name
+            key = m.group("set") if m else "all"
+            groups.setdefault(key, []).append((tag, js))
+        for set_name, rows in sorted(groups.items()):
+            L += [f"### {set_name}", "", "| run(tag) | n | plain | single | two-phase |", "|---|---|---|---|---|"]
+            for tag, js in sorted(rows):
+                acc = js.get("accuracy", {}) if isinstance(js, dict) else {}
+                L.append(f"| {tag} | {js.get('n')} | {acc.get('plain')} | {acc.get('single')} | "
+                         f"{acc.get('two-phase')} |")
+            L.append("")
     else:
         L.append("（尚未产出：等待 4a/4b 阶段）")
 
