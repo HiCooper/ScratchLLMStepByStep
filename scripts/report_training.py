@@ -84,15 +84,15 @@ def collect(cp: str | None = None):
                             "step": m.get("step"), "train_loss": m.get("train_loss"),
                             "eval_loss": m.get("eval_loss"),
                             "final": os.path.exists(os.path.join(os.path.dirname(path), "final.pt"))})
-    for name in ("eval_v2_cot_easy", "eval_v2_cot_hard"):
-        js = load(os.path.join(cp, name + ".json"))
+    for path in sorted(glob.glob(os.path.join(cp, "eval_*_cot_*.json"))):
+        js = load(path)
         if js:
-            data["thinking"][name] = js.get("summary", js)
+            data["thinking"][os.path.basename(path)[:-5]] = js.get("summary", js)
     for path in sorted(glob.glob(os.path.join(cp, "ppl_*.json"))):
         js = load(path) or {}
         data["ppl"][os.path.basename(path)[4:-5]] = {k: js.get(k) for k in
                                                      ("eval_loss", "perplexity", "rows", "tokens", "checkpoint")}
-    for path in sorted(glob.glob(os.path.join(cp, "samples_v2_*.txt")) + glob.glob(os.path.join(cp, "*", "sample.txt"))):
+    for path in sorted(glob.glob(os.path.join(cp, "samples_*.txt")) + glob.glob(os.path.join(cp, "*", "sample.txt"))):
         data["samples"][os.path.relpath(path, cp)] = read_text(path)
     # 评测中的正确率明细（若存在 details 且不含 ok 字段，则统计 success_rate）
     for name, js in list(data["thinking"].items()):
