@@ -242,6 +242,24 @@ python scripts/evaluate_pretrain.py --checkpoint models/checkpoints/pretrain_qwe
 pytest tests/ -q        # 数据管线 / 采样 / config / 模型 / trainer 单元测试
 ```
 
+### 领域增量预训练与报告
+
+外部行业语料（parquet/jsonl）应走「增量预训练 → 再 SFT」，而不是直接 SFT：
+
+```bash
+# 1) 转换 + 过滤 + 混入 15% 通用语料（防灾难性遗忘）+ token 估算
+python scripts/parquet_to_jsonl.py --src dataset/IndustryCorpus2_computer_programming_code_high \
+  --out dataset/domain/code_corpus.jsonl --min-chars 300 --max-chars 8000 --max-line-length 500 \
+  --min-quality 3.0 --mix-jsonl dataset/pretrain_t2t_mini.jsonl --mix-ratio 0.15 --mix-limit 300000
+# 2) 建 bin
+python scripts/build_pretrain_bin.py build --corpus-jsonl dataset/domain/code_corpus.jsonl \
+  --tokenizer-dir models/tokenizer_v3 --out-bin dataset/bins/code_domain.bin --max-lines 0
+# 3) 一键全自动：等 GPU 空闲 → 增量续训(lr=1e-4) → 复跑 SFT/CoT(TAG=domain) → 生成报告
+setsid nohup bash scripts/run_code_domain.sh > models/checkpoints/domain_pipeline.log 2>&1 < /dev/null &
+```
+产物：`models/checkpoints/pretrain_domain_code/`、`sft_domain_*/`、`eval_domain_cot_*.json`、
+`ppl_*.json`（多基座同切分对比），报告汇总在 `models/checkpoints/TRAINING_REPORT.md`。
+
 ### 说明
 - `models/tokenizer_qwen2`：从 ModelScope 获取的 Qwen2.5-0.5B tokenizer（151,665 词表，现代中文 BPE，
   自带 `<|im_start|>/<|im_end|>` chat 模板），训练侧由此推导词表大小；默认启用输入/输出嵌入权重共享（`--model_tie_word_embeddings`）。
