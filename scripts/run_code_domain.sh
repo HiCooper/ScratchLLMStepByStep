@@ -55,13 +55,21 @@ log "领域语料 tokens=$TOKENS"
 
 # ---------------- 1) 等待 GPU 空闲（当前下游跑完） ----------------
 log "=== 1) 等待当前下游 SFT/评测结束 ==="
-for i in $(seq 1 480); do   # 最多等 4 小时
+for i in $(seq 1 1920); do  # 最多等 16 小时（下游 SFT+CoT+评测通常 3~4h）
   busy=$(ps -eo pid,args | grep -v grep | grep -cE 'minigpt\.train\.(sft_)?trainer|eval_thinking|evaluate_pretrain|scripts/generate\.py' || true)
   free=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -1 || echo 0)
-  if [ "$busy" = "0" ] && [ "${free:-0}" -ge 3000 ]; then break; fi
+  # 必须同时满足：无下游进程 + 接力 watcher 已退出 + 连续 3 次（90s）显存空闲，
+  # 避免刚好落在两个阶段之间的 1s 间隙里误判空闲，导致与下游抢 GPU 而 OOM。
+  if [ "$busy" = "0" ] && ! pgrep -f 'wait_and_run_downstream[.]sh' >/dev/null \
+     && ! pgrep -f 'run_downstream[.]sh' >/dev/null && [ "${free:-0}" -ge 3000 ]; then
+    idle_ok=$(( ${idle_ok:-0} + 1 ))
+    [ "$idle_ok" -ge 3 ] && break
+  else
+    idle_ok=0
+  fi
   sleep 30
 done
-log "GPU 空闲检测结束（busy=$busy, free_vram=${free}MB）"
+log "GPU 空闲检测结束（busy=$busy, free_vram=${free}MB, idle_ok=${idle_ok:-0}）"
 
 # ---------------- 2) 增量预训练（自愈守护） ----------------
 STEPS_BY_TOKENS=$(( TOKENS / 4088 ))                       # bs8 × (ctx512-1)
