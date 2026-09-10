@@ -291,4 +291,10 @@ pytest tests/ -q        # 数据管线 / 采样 / config / 模型 / trainer 单�
    - `--full`：全量语料 `.bin`（缺则构建）→ 预训练（自愈守护 + `torch.compile` + 空间守护）→ 自动 SFT/CoT/评测 → 看板 `:8099`；
 4. 参考 `references/training-recipes.md`（超参/吞吐/预算换算）与 `references/troubleshooting.md`（OOM/续训/速度/磁盘等排障）自行优化。
 
+**环境自适应**：skill 会按硬件自动选预设并调整参数——
+无 GPU → `cpu` 预设（128/2/4、ctx128、fp32、2 万行小语料，仅机制验证，实测 0.12–0.17k tok/s）；
+单卡 5.5–8GB → `gpu-small`（512/10/8、ctx512、bs8、fp16 + compile，22–30k tok/s）；
+单卡更大显存 → `gpu-mid`/`gpu-large`；**多卡 → `multi-gpu`**（torchrun DDP、每卡 batch 不变、lr×√N、步数按有效 batch 重算）。
+可用 `--preset` 手动覆盖、`--hours` 指定预算自动换算目标步数、`--dry-run` 先看计划。
+
 无需人工执行脚本；agent 会后台运行长任务、轮询 `scripts/train_dashboard.py --once`，并按 skill 中的报告模板给出产物路径与指标对比。

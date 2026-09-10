@@ -178,6 +178,102 @@ def check_assets():
         ok("checkpoints", "暂无 final.pt（首次训练会新建）")
 
 
+def detect_preset(cpu, mem_gb):
+    """按硬件给出可直接使用的训练预设（agent 无需人工调参）。
+
+    返回 {"name", "reason", "model": {...}, "train": {...}, "launch": {...}, "expect"}
+    """
+    import platform
+    import torch
+    mps = bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
+    gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    vram = 0.0
+    if gpu_count:
+        vram = torch.cuda.get_device_properties(0).total_memory / 2**30
+
+    model = {"model_emb_dim": 512, "model_n_layers": 10, "model_n_heads": 8,
+             "model_context_length": 512}
+    train = {"train_batch_size": 8, "train_grad_accumulation_steps": 1,
+             "train_learning_rate": 6e-4, "train_warmup_steps": 200,
+             "train_mixed_precision_dtype": "float16", "train_torch_compile": True}
+    launch = {"nproc": 1, "extra": []}
+
+    if gpu_count == 0:
+        name = "cpu"
+        reason = "未检测到 CUDA GPU：可跑通但极慢，建议仅做小模型冒烟/小语料验证"
+        model.update({"model_emb_dim": 128, "model_n_layers": 2, "model_n_heads": 4,
+                      "model_context_length": 128})
+        train.update({"train_batch_size": 8, "train_learning_rate": 1e-3,
+                      "train_mixed_precision_dtype": "none", "train_torch_compile": False,
+                      "train_eval_steps": 50, "train_save_steps": 200})
+        expect = ("本机实测：128/2/4 ctx128 bs4 ≈ 0.17k tok/s、256/4/4 ctx256 bs2 ≈ 0.12k tok/s；"
+                  "CPU 只适合冒烟/机制验证（小语料 + 数百步），想训可用模型请用 CUDA GPU")
+        assumed = 3.0
+    elif gpu_count >= 2:
+        per = vram
+        name = "multi-gpu"
+        reason = f"检测到 {gpu_count} 张 GPU（每张约 {per:.1f}GB）：用 torchrun DDP，按 sqrt(N) 放大学习率"
+        base_lr = 6e-4
+        n = gpu_count
+        if per < 8:
+            model.update({"model_emb_dim": 384, "model_n_layers": 8, "model_context_length": 512})
+            train["train_batch_size"] = 8
+        elif per < 16:
+            train["train_batch_size"] = 12
+        else:
+            model.update({"model_emb_dim": 768, "model_n_layers": 12, "model_n_heads": 12,
+                          "model_context_length": 1024})
+            train["train_batch_size"] = 16
+        train["train_learning_rate"] = round(base_lr * (n ** 0.5), 6)
+        launch = {"nproc": n,
+                  "extra": ["--train_eval_steps", "2000", "--train_save_steps", "4000"]}
+        expect = f"有效 batch = batch×{n}×accum；吞吐≈单卡×{n}×0.8-0.9（NCCL 同步开销）"
+        assumed = 0.17
+    elif vram < 5.5:
+        name = "gpu-tiny"
+        reason = f"单卡仅 {vram:.1f}GB：用最小可用配置，可临时降 ctx/emb"
+        model.update({"model_emb_dim": 384, "model_n_layers": 8, "model_context_length": 384})
+        train["train_batch_size"] = 4
+        expect = "约 10-18k tok/s"
+        assumed = 0.25
+    elif vram < 8:
+        name = "gpu-small"
+        reason = f"单卡 {vram:.1f}GB：本仓库默认生产配置（512/10/8 ctx512 bs8 fp16 + compile）"
+        expect = "约 22-30k tok/s（RTX2060 实测）"
+        assumed = 0.17
+    elif vram < 16:
+        name = "gpu-mid"
+        reason = f"单卡 {vram:.1f}GB：可放大 ctx/ batch"
+        model["model_context_length"] = 1024
+        train["train_batch_size"] = 12
+        expect = "约 30-50k tok/s"
+        assumed = 0.12
+    else:
+        name = "gpu-large"
+        reason = f"单卡 {vram:.1f}GB：可上 768/12/12 + ctx1024"
+        model.update({"model_emb_dim": 768, "model_n_layers": 12, "model_n_heads": 12,
+                      "model_context_length": 1024})
+        train["train_batch_size"] = 16
+        expect = "约 60k+ tok/s"
+        assumed = 0.06
+
+    if mps:
+        warn("gpu:mps", "检测到 Apple MPS，但本仓库 AMP/device 逻辑仅适配 CUDA/CPU",
+             "将按 CPU 预设运行（速度慢），或改用 CUDA 机器")
+    if mem_gb is not None and mem_gb < 10:
+        train["train_batch_size"] = min(train["train_batch_size"], 4)
+        reason += "；内存 <10GB，已下调 batch"
+    # 估算用：单步耗时（秒）与每步 tokens（batch×ctx×nproc）
+    ctx = model["model_context_length"]
+    tps = train["train_batch_size"] * max(ctx - 1, 1) * max(launch.get("nproc", 1), 1)
+    preset = {"name": name, "reason": reason, "gpu_count": gpu_count,
+              "vram_gb": round(vram, 1), "model": model, "train": train,
+              "launch": launch, "expect": expect,
+              "assumed_s_per_step": assumed, "tokens_per_step": tps}
+    add("PRESET", name, f"{reason} | 预期：{expect}")
+    return preset
+
+
 def check_tests(quick: bool):
     if quick:
         warn("tests", "已跳过（--quick）")
@@ -231,13 +327,14 @@ def main():
     add("OK", "repo", ROOT)
     check_python_deps()
     check_gpu()
-    check_host()
+    cpu, mem = check_host()
+    preset = detect_preset(cpu, mem)
     check_disk()
     check_assets()
     check_tests(args.quick or args.no_tests)
     check_services()
 
-    icon = {"OK": "✅", "WARN": "⚠️ ", "BLOCKER": "❌"}
+    icon = {"OK": "✅", "WARN": "⚠️ ", "BLOCKER": "❌", "PRESET": "🎯"}
     print(f"\n=== MiniGPT preflight @ {datetime.now():%F %T} ===")
     for r in results:
         line = f"{icon[r['level']]} {r['item']:<22} {r['detail']}"
@@ -250,7 +347,8 @@ def main():
     print("结论:", "存在阻塞项，需先修复" if blockers else "环境可用，可继续训练/评测")
 
     payload = {"time": datetime.now().isoformat(timespec="seconds"), "repo": ROOT,
-               "blockers": len(blockers), "warns": len(warns), "results": results}
+               "blockers": len(blockers), "warns": len(warns), "results": results,
+               "preset": preset}
     try:
         os.makedirs(os.path.dirname(args.json), exist_ok=True)
         with open(args.json, "w", encoding="utf-8") as f:

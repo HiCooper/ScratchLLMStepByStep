@@ -63,6 +63,7 @@ class Trainer:
         self.final_metrics = {}
         self.extra_ckpt = None   # 附加到每个 checkpoint 的字典（如 config）
         self.torch_compile = bool(train_args.get("torch_compile", False))
+        self.num_workers = int(train_args.get("num_workers", 0))
         self.compile_mode = train_args.get("compile_mode", "default")
         self.metrics = None      # 可选的 MetricsLogger（tensorboard 直方图/图像/投影/模型图）
         self.tokenizer = None    # 可选：供 metrics 生成样本文本与嵌入 metadata
@@ -88,14 +89,14 @@ class Trainer:
         self.train_loader = DataLoader(train_set, 
                                        batch_size=batch_size, 
                                        shuffle=(sampler==None), 
-                                       num_workers=0, 
+                                       num_workers=self.num_workers, 
                                        drop_last=True, 
                                        collate_fn=self.batch_collator,
                                        sampler=sampler)
         self.eval_loader = DataLoader(eval_set, 
                                       batch_size=batch_size, 
                                       shuffle=True, 
-                                      num_workers=0, 
+                                      num_workers=self.num_workers, 
                                       drop_last=False,
                                       collate_fn=self.batch_collator)
         self.steps_per_epoch = len(self.train_loader)

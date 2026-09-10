@@ -16,6 +16,23 @@ bash skills/minigpt-train/scripts/pipeline.sh --smoke
 bash skills/minigpt-train/scripts/pipeline.sh --full
 ```
 
+## 环境自适应（先体检，再按预设跑）
+
+`preflight.sh` 会检测硬件并打印/写入推荐预设（`models/checkpoints/preflight.json: preset`），
+`pipeline.sh` 自动消费它；也可 `--preset cpu|gpu-tiny|gpu-small|gpu-mid|gpu-large|multi-gpu` 手动覆盖，
+并用 `--hours <预算>` 自动换算目标步数：
+
+| 环境 | 预设 | 模型 | 关键参数 | 预期 |
+|---|---|---|---|---|
+| 无 GPU（含 MPS 回退） | `cpu` | 128/2/4 | ctx128, fp32, 不开 compile, 2 万行小语料 | 0.12–0.17k tok/s，**仅机制验证** |
+| 单卡 <5.5GB | `gpu-tiny` | 384/8/8 | bs4, fp16, compile | 10–18k tok/s |
+| 单卡 5.5–8GB（本机） | `gpu-small` | 512/10/8 | bs8, ctx512, fp16, compile | 22–30k tok/s |
+| 单卡 ≥8GB | `gpu-mid`/`gpu-large` | 512/10/8 或 768/12/12 | 更大 ctx/batch | 30–60k+ tok/s |
+| ≥2 张 GPU | `multi-gpu` | 按单卡显存 | `NPROC=N`（torchrun DDP），lr×√N | ≈单卡×N×0.85 |
+
+CPU 环境下 agent 的正确做法：跑 `--smoke`/`--full --preset cpu --hours 1` 验证链路，明确告知用户「无 GPU 只能验证机制」，
+建议改用 CUDA 机器继续；多卡环境：`--nproc N` 或 `NPROC=N`，有效 batch=batch×N×accum，step 数按有效 batch 重算。
+
 ## 训练相关事实（决策前必读）
 
 - 默认配置：**32k 词表（`models/tokenizer_v3`）+ 512/10/8 + ctx512 + fp16 + `torch.compile`** ≈ 22–30k tok/s（RTX2060 6GB 实测）。
