@@ -103,12 +103,33 @@ def resolve_run(args, scan_bytes=2_000_000):
     return best, out, os.path.basename(best)
 
 
+def _configured_max_steps(out_dir, cache={}):
+    """从 run 的 config.json 读取 train.max_steps（0 表示未设置）。按 mtime 做轻量缓存。"""
+    path = os.path.join(out_dir, "config.json")
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return 0
+    hit = cache.get(path)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        val = int((cfg.get("train") or {}).get("max_steps", 0) or 0)
+    except Exception:  # noqa: BLE001
+        val = 0
+    cache[path] = (mtime, val)
+    return val
+
+
 def snapshot(args):
-    args.log, auto_out, run_name = resolve_run(args)
-    if args.out_dir == "auto":
-        args.out_dir = auto_out
-    data = parse_log(args.log)
-    wd_log = args.watchdog_log or (args.out_dir.rstrip("/") + ".watchdog.log")
+    # 注意：不要把解析结果写回 args.log —— 否则 auto 模式在第一次请求后就被"钉死"，
+    # 训练阶段切换（预训练 → SFT → 评测）时看板会一直显示旧 run（踩过的坑）。
+    log, auto_out, run_name = resolve_run(args)
+    out_dir = auto_out if args.out_dir == "auto" else args.out_dir
+    data = parse_log(log)
+    wd_log = args.watchdog_log or (out_dir.rstrip("/") + ".watchdog.log")
     wd = parse_log(wd_log) if os.path.exists(wd_log) else {"restarts": 0}
     data["restarts"] = max(data.get("restarts", 0), wd.get("restarts", 0))
     evals = data["evals"]
@@ -122,14 +143,18 @@ def snapshot(args):
         if dsteps > 0:
             rate = {"s_per_step": dt / dsteps, "tok_per_s": dsteps * args.tokens_per_step / dt}
     step = last["step"] if last else 0
+    # 目标步数优先级：显式 --target-step > run 的 config.json:train.max_steps > 日志里的总步数。
+    # 必须看 max_steps：领域增量续训时 epochs*每epoch步数 会远大于实际目标，进度/ETA 会算错。
     target = args.target_step
-    if last and last.get("total", 0) > step:
-        target = last["total"]          # 用当前 run 自己的总步数（预训练 422520 / SFT 14700 …）
+    if not target:
+        target = _configured_max_steps(out_dir)
+    if not target and last and last.get("total", 0) > step:
+        target = last["total"]
     eta_min = (target - step) * rate["s_per_step"] / 60 if rate and target > step else None
     prog = min(1.0, step / target) if target else 0.0
     try:
-        with open(args.log, "rb") as f:
-            f.seek(max(0, os.path.getsize(args.log) - 20000))
+        with open(log, "rb") as f:
+            f.seek(max(0, os.path.getsize(log) - 20000))
             tail = f.read().decode("utf-8", "replace").splitlines()[-12:]
     except OSError:
         tail = []
@@ -137,9 +162,9 @@ def snapshot(args):
             "progress": round(prog, 4), "epoch": data["epoch"], "restarts": data["restarts"],
             "log_size_mb": round(data["size"] / 1e6, 1), "last": last, "rate": rate,
             "eta_min": None if eta_min is None else round(eta_min, 1), "evals": evals[-300:],
-            "checkpoints": checkpoints(args.out_dir), "gpu": gpu_info(), "tail": tail,
-            "final_exists": os.path.exists(os.path.join(args.out_dir, "final.pt")),
-            "best_exists": os.path.exists(os.path.join(args.out_dir, "best.pt"))}
+            "checkpoints": checkpoints(out_dir), "gpu": gpu_info(), "tail": tail,
+            "final_exists": os.path.exists(os.path.join(out_dir, "final.pt")),
+            "best_exists": os.path.exists(os.path.join(out_dir, "best.pt"))}
 
 
 def ascii_spark(values, width=64):
@@ -344,7 +369,8 @@ def main():
                     help="训练日志；默认 auto=自动选取最近仍有评估输出的 run 日志")
     ap.add_argument("--out-dir", default="auto",
                     help="checkpoint 目录；默认 auto=与日志同名的 run 目录")
-    ap.add_argument("--target-step", type=int, default=211000)
+    ap.add_argument("--target-step", type=int, default=0,
+                    help="目标步数；0=自动（用当前 run 日志里的总步数）")
     ap.add_argument("--tokens-per-step", type=int, default=8 * 511)
     ap.add_argument("--refresh", type=int, default=5)
     ap.add_argument("--serve", action="store_true")

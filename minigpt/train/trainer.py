@@ -236,9 +236,10 @@ class Trainer:
         self.train_loss_acc += loss.item()/dist.get_world_size()
     
     def _record_metrics(self, train_loss, eval_loss, grad_norm, lr):
+        # 展示用总步数用 effective_max：领域增量续训时 epochs*每epoch步数 会远大于实际目标
         print(f"{self.cur_time()} lr={lr:.5f}, train_loss: {train_loss:.4f}, "
             + f"eval_loss: {eval_loss:.4f}, grad_norm={grad_norm:.5f}, "
-            + f"steps: {self.step}/{self.total_steps}"
+            + f"steps: {self.step}/{self.effective_max or self.total_steps}"
         )
         self.last_eval_loss = eval_loss
         if eval_loss < self.best_eval_loss:
