@@ -78,7 +78,35 @@ def checkpoints(out_dir):
     return [{k: v for k, v in r.items() if k != "atime"} for r in rows[-8:]]
 
 
+def resolve_run(args, scan_bytes=2_000_000):
+    """auto 模式：在 models/checkpoints/*.log 中挑选最近仍在产出评估的日志（支持 SFT 阶段）。"""
+    import glob as _glob
+    if args.log != "auto":
+        log = args.log
+        out = args.out_dir if args.out_dir != "auto" else os.path.splitext(log)[0]
+        return log, out, os.path.basename(log)
+    candidates = []
+    for pat in ("models/checkpoints/*.log", "*.log"):
+        candidates += _glob.glob(pat)
+    best, best_ts = None, ""
+    for path in set(candidates):
+        if path.endswith((".watchdog.log", ".downstream.log")):
+            continue
+        info = parse_log(path, tail_bytes=scan_bytes)
+        if info["evals"]:
+            ts = info["evals"][-1]["ts"]
+            if ts > best_ts:
+                best, best_ts = path, ts
+    if best is None:
+        best = args.log if args.log != "auto" else "models/checkpoints/pretrain_v2_full.log"
+    out = os.path.splitext(best)[0]
+    return best, out, os.path.basename(best)
+
+
 def snapshot(args):
+    args.log, auto_out, run_name = resolve_run(args)
+    if args.out_dir == "auto":
+        args.out_dir = auto_out
     data = parse_log(args.log)
     wd_log = args.watchdog_log or (args.out_dir.rstrip("/") + ".watchdog.log")
     wd = parse_log(wd_log) if os.path.exists(wd_log) else {"restarts": 0}
@@ -94,15 +122,18 @@ def snapshot(args):
         if dsteps > 0:
             rate = {"s_per_step": dt / dsteps, "tok_per_s": dsteps * args.tokens_per_step / dt}
     step = last["step"] if last else 0
-    eta_min = (args.target_step - step) * rate["s_per_step"] / 60 if rate and args.target_step > step else None
-    prog = min(1.0, step / args.target_step) if args.target_step else 0.0
+    target = args.target_step
+    if last and last.get("total", 0) > step:
+        target = last["total"]          # 用当前 run 自己的总步数（预训练 422520 / SFT 14700 …）
+    eta_min = (target - step) * rate["s_per_step"] / 60 if rate and target > step else None
+    prog = min(1.0, step / target) if target else 0.0
     try:
         with open(args.log, "rb") as f:
             f.seek(max(0, os.path.getsize(args.log) - 20000))
             tail = f.read().decode("utf-8", "replace").splitlines()[-12:]
     except OSError:
         tail = []
-    return {"now": datetime.now().strftime("%F %T"), "step": step, "target_step": args.target_step,
+    return {"now": datetime.now().strftime("%F %T"), "run": run_name, "step": step, "target_step": target,
             "progress": round(prog, 4), "epoch": data["epoch"], "restarts": data["restarts"],
             "log_size_mb": round(data["size"] / 1e6, 1), "last": last, "rate": rate,
             "eta_min": None if eta_min is None else round(eta_min, 1), "evals": evals[-300:],
@@ -121,7 +152,7 @@ def ascii_spark(values, width=64):
 
 
 def render_text(s):
-    lines = [f"[{s['now']}]  训练看板（每 5s 刷新）",
+    lines = [f"[{s['now']}]  训练看板（每 5s 刷新）  run={s.get('run','-')}",
              f"进度: {s['step']}/{s['target_step']}  ({s['progress']*100:.1f}%)  epoch={s['epoch']}  重启={s['restarts']}"]
     if s["last"]:
         l = s["last"]
@@ -306,8 +337,10 @@ def make_handler(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--log", default="models/checkpoints/pretrain_v2_full.log")
-    ap.add_argument("--out-dir", default="models/checkpoints/pretrain_v2_full")
+    ap.add_argument("--log", default="auto",
+                    help="训练日志；默认 auto=自动选取最近仍有评估输出的 run 日志")
+    ap.add_argument("--out-dir", default="auto",
+                    help="checkpoint 目录；默认 auto=与日志同名的 run 目录")
     ap.add_argument("--target-step", type=int, default=211000)
     ap.add_argument("--tokens-per-step", type=int, default=8 * 511)
     ap.add_argument("--refresh", type=int, default=5)

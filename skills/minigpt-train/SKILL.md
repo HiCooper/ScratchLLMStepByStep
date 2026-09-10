@@ -104,7 +104,8 @@ NPROC=4 bash scripts/pretrain_start.sh --paths_output_dir models/checkpoints/pre
 | `scripts/evaluate_pretrain.py` | loss / perplexity（`--max-rows` 控耗时） |
 | `scripts/eval_thinking.py` | 思考模式对比（plain/single/two-phase，`--repetition-penalty 1.0`） |
 | `scripts/build_cot_sft.py` | CoT 数据（`--profile easy|hard`，自带答案） |
-| `scripts/train_dashboard.py` | 看板（网页 8099 / `--once` / `--plot`） |
+| `scripts/train_dashboard.py` | 看板（网页 8099 / `--once` / `--plot`；默认**自动跟随当前正在跑的 run**，含 SFT 阶段） |
+| `scripts/report_training.py` | 汇总全部 run/评测 → Markdown 报告（ppl 对比、思考模式准确率、样例；`--json` 供 agent 解析） |
 | `scripts/train_pretrain_resilient.sh` | 自愈长训（崩溃自动续训；环境变量可覆盖 OUT_DIR/DATA_BIN/PRESET_ARGS/TARGET_STEPS/NPROC） |
 | `scripts/checkpoint_janitor.sh` | 每目录保留最近 N 个 checkpoint（防磁盘写满） |
 | `scripts/run_downstream.sh`、`wait_and_run_downstream.sh` | SFT→CoT→评测自动接力 |
@@ -173,6 +174,11 @@ python scripts/evaluate_pretrain.py --checkpoint <ckpt> --tokenizer-dir models/t
   --bin <bin> --max-rows 512 --output models/checkpoints/ppl.json
 python scripts/eval_thinking.py --checkpoint <ckpt> --eval-jsonl dataset/sft/cot_eval_easy_zh.jsonl \
   --n 60 --strategies plain,single,two-phase --repetition-penalty 1.0 --output models/checkpoints/eval_thinking.json
+```
+
+生成汇总报告（下游跑完后执行，产物 `models/checkpoints/TRAINING_REPORT.md`）：
+```bash
+python3 scripts/report_training.py --json /tmp/report.json
 ```
 
 汇报模板：
