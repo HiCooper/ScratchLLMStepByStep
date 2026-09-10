@@ -207,6 +207,7 @@ PAGE = r"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <div class="card" style="margin-top:14px"><div class="k">日志尾部</div><pre id="tail"></pre></div>
 <script>
 const REFRESH = __REFRESH__;
+const GRAD_CLIP = __GRAD_CLIP__;
 function chart(svg, series, opts){
   const W=900,H=opts.h,mL=62,mR=14,mT=14,mB=28, iw=W-mL-mR, ih=H-mT-mB;
   let pts=series.flatMap(s=>s.points);
@@ -223,6 +224,11 @@ function chart(svg, series, opts){
   for(let i=0;i<=5;i++){const x=mL+iw*i/5, val=x0+(x1-x0)*i/5;
     g+=`<line x1="${x.toFixed(1)}" y1="${mT}" x2="${x.toFixed(1)}" y2="${mT+ih}" stroke="#1c2129"/>`;
     g+=`<text x="${x.toFixed(1)}" y="${H-8}" fill="#8b93a7" font-size="11" text-anchor="middle">${(val/1000).toFixed(0)}k</text>`;}
+  if(opts.refLine!==undefined && opts.refLine>=y0 && opts.refLine<=y1){
+    const yr=sy(opts.refLine);
+    g+=`<line x1="${mL}" y1="${yr.toFixed(1)}" x2="${W-mR}" y2="${yr.toFixed(1)}" stroke="#ef4444" stroke-dasharray="6 4" stroke-width="1.2"/>`;
+    g+=`<text x="${W-mR-4}" y="${(yr-5).toFixed(1)}" fill="#ef4444" font-size="11" text-anchor="end">clip ${opts.refLine}</text>`;
+  }
   let body='';
   for(const s of series){
     const d=s.points.map(p=>`${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`).join(' ');
@@ -256,9 +262,12 @@ async function tick(){
         [{name:'train_loss',color:'#3b82f6',points:ev.map(e=>({x:e.step,y:e.train,ts:e.ts}))},
          {name:'eval_loss', color:'#22c55e',points:ev.map(e=>({x:e.step,y:e.eval, ts:e.ts}))}],
         {h:260,digits:3,legendId:'lossLegend'});
+  const gv=ev.map(e=>e.grad);
+  const gstats=gv.length?`  min ${Math.min(...gv).toFixed(3)} · mean ${(gv.reduce((a,b)=>a+b,0)/gv.length).toFixed(3)} · max ${Math.max(...gv).toFixed(3)}`:'';
   chart(document.getElementById('gradChart'),
         [{name:'grad_norm',color:'#f59e0b',points:ev.map(e=>({x:e.step,y:e.grad,ts:e.ts}))}],
-        {h:200,digits:2,legendId:'gradLegend'});
+        {h:200,digits:2,legendId:'gradLegend',refLine:GRAD_CLIP});
+  const gl=document.getElementById('gradLegend'); if(gl) gl.textContent=(gl.textContent||'')+gstats;
   document.getElementById('ckpt').innerHTML=d.checkpoints.slice().reverse().map(c=>
     `<tr><td>${c.name}</td><td>${c.size_mb}MB</td><td>${c.mtime}</td></tr>`).join('');
   document.getElementById('tail').textContent=d.tail.join('\n');
@@ -279,7 +288,8 @@ def make_handler(args):
                 body = json.dumps(snapshot(args), ensure_ascii=False).encode()
                 ctype = "application/json; charset=utf-8"
             elif self.path in ("/", "/index.html"):
-                body = PAGE.replace("__REFRESH__", str(args.refresh)).encode()
+                body = (PAGE.replace("__REFRESH__", str(args.refresh))
+                    .replace("__GRAD_CLIP__", str(args.grad_clip))).encode()
                 ctype = "text/html; charset=utf-8"
             else:
                 self.send_response(404); self.end_headers(); return
@@ -302,6 +312,8 @@ def main():
     ap.add_argument("--port", type=int, default=8099)
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--plot", default=None, help="导出损失走势图 PNG 后退出")
+    ap.add_argument("--grad-clip", type=float, default=1.0,
+                    help="梯度裁剪阈值：在看板 grad 图上画参考线（与 trainer 的 grad_clip 一致）")
     args = ap.parse_args()
 
     if args.plot:
