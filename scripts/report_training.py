@@ -97,7 +97,8 @@ def collect(cp: str | None = None):
     for path in sorted(glob.glob(os.path.join(cp, "ppl_*.json"))):
         js = load(path) or {}
         data["ppl"][os.path.basename(path)[4:-5]] = {k: js.get(k) for k in
-                                                     ("eval_loss", "perplexity", "rows", "tokens", "checkpoint")}
+                                                     ("eval_loss", "perplexity", "rows", "tokens",
+                                                      "checkpoint", "bin", "max_rows")}
     for path in sorted(glob.glob(os.path.join(cp, "samples_*.txt")) + glob.glob(os.path.join(cp, "*", "sample.txt"))):
         data["samples"][os.path.relpath(path, cp)] = read_text(path)
     # 评测中的正确率明细（若存在 details 且不含 ok 字段，则统计 success_rate）
@@ -146,13 +147,20 @@ def render(d: dict) -> str:
 
     L += ["", "## 2. 同切分 perplexity 对比（同一 bin / 同一 --max-rows）", ""]
     if d["ppl"]:
-        items = sorted(d["ppl"].items(), key=lambda kv: (kv[1].get("eval_loss") is None, kv[1].get("eval_loss")))
-        base = items[0][1].get("eval_loss") if items else None
-        L += ["| run | eval_loss | perplexity | 相对首个降低 | 评估窗口 |", "|---|---|---|---|---|"]
-        for k, v in items:
-            el = v.get("eval_loss")
-            delta = "—" if (el is None or base in (None, 0)) else f"{(1 - el / base) * 100:+.1f}%"
-            L.append(f"| {k} | {el} | {v.get('perplexity')} | {delta} | {v.get('rows')} |")
+        # 按评估语料分组：只有同 bin + 同窗口数的数字才可直接比较，不同语料混在一张表里会误导
+        groups = {}
+        for k, v in d["ppl"].items():
+            groups.setdefault((v.get("bin") or "(未记录)", v.get("max_rows")), []).append((k, v))
+        for (bin_path, max_rows), items in sorted(groups.items()):
+            items.sort(key=lambda kv: (kv[1].get("eval_loss") is None, kv[1].get("eval_loss")))
+            base = items[0][1].get("eval_loss") if items else None
+            L += [f"**语料 `{bin_path}`（max-rows={max_rows}）**", "",
+                  "| run | eval_loss | perplexity | 相对最优降低 | 评估窗口 |", "|---|---|---|---|---|"]
+            for k, v in items:
+                el = v.get("eval_loss")
+                delta = "—" if (el is None or base in (None, 0)) else f"{(1 - el / base) * 100:+.1f}%"
+                L.append(f"| {k} | {_num(el)} | {_num(v.get('perplexity'), 2)} | {delta} | {v.get('rows')} |")
+            L.append("")
     else:
         L.append("（尚未产出：等待 run_downstream.sh 的 4c 阶段）")
 

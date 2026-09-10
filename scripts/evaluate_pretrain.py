@@ -64,6 +64,8 @@ def main():
         "eval_loss": mean,
         "perplexity": math.exp(min(mean, 80.0)),
         "checkpoint": args.checkpoint,
+        "bin": args.bin,
+        "max_rows": args.max_rows,
         "eval_seconds": round(time.time() - t0, 2),
     }
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
