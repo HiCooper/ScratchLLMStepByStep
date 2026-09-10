@@ -278,14 +278,46 @@ setsid nohup bash scripts/run_code_domain.sh > models/checkpoints/domain_pipelin
 结论：模型词表由 tokenizer 推导（config 可切回 Qwen2.5 在任何更大显存机器上使用）。
 
 ### 产物
-- 预训练：`models/checkpoints/pretrain_v1_512/`
+- 预训练 v1：`models/checkpoints/pretrain_v1_512/`
   - 语料：600,000 行 → `dataset/bins/pretrain_v3_600k.bin`（67.7M tokens，uint16+meta）
   - 模型：384→实际 512/10/8，47.9M 参数，ctx512，嵌入共享，fp16+scaler，3 epochs / 49,509 步
   - 结果：eval_loss ≈ 3.51（perplexity ≈ 33.3）；周期 checkpoint-{9000,18000,27000,36000,45000}.pth、
     `final.pt`（含 config）、tensorboard/、metrics.json、sample.txt
-- SFT：`models/checkpoints/sft_v1_512/`
-  - 数据：deepctrl `sft_data_zh.jsonl` 前 40,000 条，lr=2e-5，1 epoch / 4,900 步
-  - 结果：`final.pt`、metrics.json、`final_samples.txt`（指令问答示例）
+- 预训练 v2（10 小时满负荷）：`models/checkpoints/pretrain_v2_full/`
+  - 语料：全量 1,269,916 行 → `dataset/bins/pretrain_v3_full.bin`（**247.5M tokens**，uint16+meta）
+  - 从 v1 续训 6 个 epoch / **211,000 步**（≈ 8.6 亿训练 tokens），cosine 退火 + grad clip 1.0 + `torch.compile`
+  - 结果：eval_loss **2.8188**（perplexity **16.76**），训练 loss 1.396
+- SFT：`models/checkpoints/sft_v1_512/`（v1 基座）
+
+### 基座对比（同一 `.bin`、同一 `--max-rows 512`，口径严格一致）
+
+| 基座 | 训练步数 | 训练 tokens | eval_loss | perplexity | 相对 v1 |
+|---|---|---|---|---|---|
+| `pretrain_v1_512` | 49,509 | 0.68 亿 | 3.6323 | 37.80 | — |
+| `pretrain_v2_full` | 211,000 | 8.6 亿 | **3.1637** | **23.66** | loss **−12.9%**，ppl **−37.4%** |
+
+10 小时把同切分 ppl 从 37.8 降到 23.7，是本仓库"规模换质量"最直接的一组数据。
+
+### 下游 SFT / CoT（v2 基座，`models/checkpoints/sft_v2_*`）
+
+| run | 数据 | 步数 | eval_loss |
+|---|---|---|---|
+| `sft_v2_chat` | `sft_data_zh.jsonl` 60k × 2 epochs | 14,700 | 2.7795 |
+| `sft_v2_cot_easy` | `sft_cot_easy_60k.jsonl`（45k 合成 + 15k 通用）× 2 epochs | 14,700 | 1.7397（best 1.6109@12499） |
+| `sft_v2_cot_hard` | `sft_cot_hard_80k.jsonl`（60k 合成 + 20k 通用）× 3 epochs | 29,400 | 1.36 附近 |
+
+思考模式留出集（60 题，贪心解码，`--repetition-penalty 1.0`）：
+
+| 任务档次 | 模型 | plain | single（单通道 CoT） | two-phase |
+|---|---|---|---|---|
+| **easy**（1~2 位数单/两步） | 预训练基座（v1） | 0.0% | 1.7% | 1.7% |
+| | CoT-SFT v1（20k 条） | 90.0% | 90.0% | 90.0% |
+| | **CoT-SFT v2（60k 条 × 2ep）** | **100.0%** | **100.0%** | **98.3%** |
+| **hard**（多位数四则 + 应用题） | CoT-SFT v1（30k 条） | 1.7% | 3.3% | 3.3% |
+| | CoT-SFT v2（80k 条 × 3ep） | 1.7% | 3.3% | 3.3% |
+
+结论：**更强基座 + 更多 CoT 数据把 easy 从 90% 推到 100%**；hard 仍是容量墙（47.9M 参数在多位数乘加上算不对），
+需要放大模型或走「工具调用范式」（模型只生成算式，由 Python 结算）。详见 `minigpt/README.md` §8。
 
 ### 生成示例（SFT 后，温度0.8/top-k50/top-p0.92）
 ```
@@ -295,7 +327,8 @@ setsid nohup bash scripts/run_code_domain.sh > models/checkpoints/domain_pipelin
 用户: 用一句话解释机器学习。
 模型: 机器学习是人工智能的一个分支，它让计算机从数据中学习，并根据规律进行预测和决策。
 ```
-更多见 `models/checkpoints/sft_v1_512/final_samples.txt`。
+更多见 `models/checkpoints/sft_v1_512/final_samples.txt`、`models/checkpoints/samples_v2_chat.txt`、
+`models/checkpoints/samples_v2_cot.txt`。
 
 ## 🤖 交给 Agent 自动训练（Skill）
 
