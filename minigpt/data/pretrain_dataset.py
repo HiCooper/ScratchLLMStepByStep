@@ -236,18 +236,23 @@ class TokenBinDataset(Dataset):
     """窗口化 token 流数据集（uint16/uint32 自适应）。
 
     - 读取 .meta.json 判断 dtype；无 meta 时按 uint16 兼容旧产物。
-    - 返回 (input, target)，长度为 max_len-1 / 由窗口滑出（与 PretrainBinaryDataset 一致：
-      total_tokens//max_len 行，每行 [0,max_len)，输入取 [0,max_len)，目标取 [1,max_len])。
+    - 用 `np.memmap` 惰性映射，不把整个 bin 读进内存（v3 全量 uint16 约 495MB，
+      uint32 约 1GB；旧实现用 np.fromfile，每个 DataLoader worker 各持一份，
+      域外语料放大后极易 OOM）。
+    - 返回 (input, target)，长度为 max_len-1：total_tokens//max_len 行，
+      每行 [0,max_len)，输入取 [0,max_len)，目标取 [1,max_len)。
     """
 
     def __init__(self, bin_path, max_len, meta_path=""):
         import numpy as _np
+        self.bin_path = bin_path
         self.max_len = max_len
         self.meta, self.meta_file = load_bin_meta(bin_path, meta_path)
         self.dtype = (self.meta or {}).get("dtype", "uint16")
-        arr = _np.fromfile(bin_path, dtype=self.dtype)
-        rows = arr.size // max_len
-        self.data = arr[: rows * max_len].reshape(rows, max_len)
+        self.flat = _np.memmap(bin_path, dtype=self.dtype, mode="r")
+        self.total_tokens = int(self.flat.size)
+        rows = self.total_tokens // max_len
+        self.data = self.flat[: rows * max_len].reshape(rows, max_len)
 
     def __len__(self):
         return self.data.shape[0]
@@ -257,4 +262,125 @@ class TokenBinDataset(Dataset):
         input_ids = item[:-1].astype(np.int64)
         target_ids = item[1:].astype(np.int64)
         return torch.from_numpy(input_ids), torch.from_numpy(target_ids)
+
+
+def validate_bin_tokenizer(bin_path, tokenizer, meta_path="") -> dict:
+    """校验 .bin 与 tokenizer 是否配套（词表大小必须一致）。
+
+    真实隐患：`.meta.json` 里已经写了 vocab_size，但训练入口以前只按 `len(tokenizer)`
+    建模型，不比对 meta——用默认的 qwen2 词表(151643) 去训 v3 的 bin(32000) 会静默
+    错配（embedding 白建 5 倍参数）。加载侧 `checkpoint.py` 已做严格校验，训练侧补齐。
+    """
+    meta, meta_file = load_bin_meta(bin_path, meta_path)
+    tok_vocab = len(tokenizer)
+    if meta is None:
+        return {"checked": False, "reason": f"未找到 {meta_file}", "tokenizer_vocab": tok_vocab}
+    bin_vocab = meta.get("vocab_size")
+    if bin_vocab is not None and int(bin_vocab) != tok_vocab:
+        raise ValueError(
+            f"分词器与 .bin 不配套：{bin_path} 的 meta.vocab_size={bin_vocab}，"
+            f"而 tokenizer 词表={tok_vocab}（meta 记录的分词器：{meta.get('tokenizer')!r}）。\n"
+            f"请确认 --data_tokenizer_dir 与构建该 bin 时使用的一致。")
+    return {"checked": True, "bin_vocab": bin_vocab, "tokenizer_vocab": tok_vocab,
+            "bin_tokens": meta.get("tokens"), "meta_file": meta_file}
+
+
+def _scan_back_to_doc_start(ds, token_pos, eos_id, max_scan=65536):
+    """从 token_pos 向前找到最近的 eos，返回其后一个位置（即文档起点）。"""
+    if eos_id is None or token_pos <= 0:
+        return int(token_pos)
+    import numpy as _np
+    lo = max(0, int(token_pos) - max_scan)
+    seg = _np.asarray(ds.flat[lo:int(token_pos)])
+    hits = _np.nonzero(seg == eos_id)[0]
+    if hits.size == 0:
+        return int(token_pos)
+    return lo + int(hits[-1]) + 1
+
+
+def _scan_forward_to_doc_end(ds, token_pos, eos_id, max_scan=65536):
+    """从 token_pos 向后找到最近的 eos，返回其后一个位置（即文档结束边界）。"""
+    if eos_id is None:
+        return int(token_pos)
+    import numpy as _np
+    hi = min(int(ds.flat.size), int(token_pos) + max_scan)
+    if token_pos >= hi:
+        return int(token_pos)
+    seg = _np.asarray(ds.flat[int(token_pos):hi])
+    hits = _np.nonzero(seg == eos_id)[0]
+    if hits.size == 0:
+        return int(token_pos)
+    return int(token_pos) + int(hits[0]) + 1
+
+
+def split_train_eval_blocks(ds, eval_ratio=0.002, max_eval=512, eos_id=None, n_blocks=32):
+    """把验证集切成 n_blocks 个**均匀分布**的块，每块双端对齐文档边界。
+
+    为什么不能随机抽窗口（旧实现 random_split）：文档中位长度只有 ~151 token，
+    而窗口 512，一个窗口平均横跨 ~2.6 篇文档。窗口边界几乎必然切断某篇文档，
+    随机切就会让"文档前半在训练集、后半在验证集"。实测该切分下有相当比例的验证
+    token 属于训练时见过的文档，eval_loss 偏乐观。
+
+    为什么也不能只取尾部连续块：本语料 `pretrain_t2t_mini.jsonl` 是**按领域排序**的，
+    尾部整段是英文选择题、头部是中文创作/指令。实测同一 checkpoint
+      head 前 64 窗 ppl=23.40  vs  尾部 64 窗 ppl=6.78
+    取尾部会把"验证集"变成单一领域，测出来的不是整体质量，而且与 trainer 内部
+    随机切分的 eval_loss（同一 ckpt 为 16.8）完全不是一个口径。
+
+    做法：每块先向前吸附到文档起点、再向后吸附到文档结束边界，取 token 区间
+    [doc_start, doc_end)。训练集排除所有**与该区间重叠**的窗口（保证没有文档被
+    train/eval 劈开），验证集只取**完全落在区间内**的窗口。
+
+    返回 (train_subset, eval_subset, info)。
+    """
+    import numpy as _np
+    from torch.utils.data import Subset
+    n_rows = len(ds)
+    L = ds.max_len
+    if n_rows < 4 * n_blocks:
+        raise ValueError(f"数据集窗口数过少({n_rows})，无法切出 {n_blocks} 个验证块")
+    n_eval = max(n_blocks, min(int(n_rows * eval_ratio), int(max_eval), n_rows // 4))
+    per_block = max(1, n_eval // n_blocks)
+    stride = n_rows // n_blocks
+
+    val_tok_ranges, blocks = [], []
+    for b in range(n_blocks):
+        nominal_tok = b * stride * L
+        doc_start = _scan_back_to_doc_start(ds, nominal_tok, eos_id)
+        doc_end = _scan_forward_to_doc_end(ds, doc_start + per_block * L, eos_id)
+        if doc_end <= doc_start:
+            doc_end = doc_start + per_block * L
+        val_tok_ranges.append((doc_start, doc_end))
+        blocks.append({"block": b, "doc_start_token": doc_start, "doc_end_token": doc_end})
+
+    excluded = _np.zeros(n_rows, dtype=bool)   # 与验证区间重叠的窗口（训练集要排除）
+    val_mask = _np.zeros(n_rows, dtype=bool)   # 完全落在验证区间内的窗口
+    for s, e in val_tok_ranges:
+        w_lo, w_hi = s // L, min(n_rows, -(-e // L))
+        excluded[w_lo:w_hi] = True
+        v_lo, v_hi = -(-s // L), e // L
+        if v_hi > v_lo:
+            val_mask[v_lo:v_hi] = True
+            excluded[v_lo:v_hi] = True
+    train_rows = int((~excluded).sum())
+    eval_rows = int(val_mask.sum())
+    if train_rows < 1 or eval_rows < 1:
+        raise ValueError(f"切分失败：train={train_rows} eval={eval_rows}（n_rows={n_rows}）")
+
+    info = {
+        "split": "blocked-document-aligned",
+        "train_rows": train_rows,
+        "eval_rows": eval_rows,
+        "excluded_rows": int(excluded.sum()),
+        "n_blocks": n_blocks,
+        "windows_per_block": per_block,
+        "requested_eval_ratio": eval_ratio,
+        "actual_eval_ratio": round(eval_rows / n_rows, 6),
+        "eos_id": eos_id,
+        "blocks": blocks,
+    }
+    return (Subset(ds, _np.nonzero(~excluded)[0].tolist()),
+            Subset(ds, _np.nonzero(val_mask)[0].tolist()),
+            info)
+
 

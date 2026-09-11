@@ -3,7 +3,7 @@
 用法：
     python3 -m minigpt.train.sft_trainer \
         --pretrain models/checkpoints/pretrain_qwen_v1/final.pt \
-        --tokenizer-dir models/tokenizer_qwen2 \
+        --data_tokenizer_dir models/tokenizer_v3 \
         --sft-jsonl dataset/sft/sft_data_zh.jsonl \
         --paths_output_dir models/checkpoints/sft_qwen_v1 \
         --train_epochs 1 --train_batch_size 4 --train_max_steps 4000 \
@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader
 from minigpt.config import (DataConfig, ModelConfig, TrainConfig, PathConfig,
                             add_cli_overrides, build_run_config, dump_run_config)
 from minigpt.data.sft_dataset import (InstructionDataset, create_batch_collator,
-                                      split_dataset)
+                                      resolve_stop_token_ids, split_dataset)
 from minigpt.model.checkpoint import model_kwargs_from_checkpoint
 from minigpt.model.transformer import GPTConfig, MiniGPT
 from minigpt.train.trainer import Trainer
@@ -60,7 +60,9 @@ def main():
     if tokenizer.unk_token_id is None and tokenizer.eos_token_id is not None:
         tokenizer.unk_token = tokenizer.eos_token
 
-    sft_jsonl = args.sft_jsonl or dc.sft_dataset
+    # sft_dataset 定义在 PathConfig 上（旧写法 dc.sft_dataset 在不传 --sft-jsonl 时
+    # 会直接 AttributeError：DataConfig 里没有这个字段）
+    sft_jsonl = args.sft_jsonl or pc.sft_dataset
     max_len = args.data_max_len
 
     # 架构：优先继承预训练 checkpoint 的 config；缺失时按权重形状反推；最后才用 CLI/默认配置
@@ -165,7 +167,8 @@ def main():
         for text in ["什么是AI？", "用一句话解释机器学习。", "写一首描写秋天的五言绝句。"]:
             prompt = build_chat(tokenizer, text)
             ids = torch.tensor([tokenizer.encode(prompt)]).to(device)
-            out = model.generate(ids, 100, tokenizer.eos_token_id, use_kv_cache=False)
+            # chat 模型的回合结束符是 <|im_end|>，未必等于 eos_token_id（qwen2 下不同）
+            out = model.generate(ids, 100, resolve_stop_token_ids(tokenizer), use_kv_cache=False)
             resp = tokenizer.decode(out[0][ids.shape[1]:].tolist(), skip_special_tokens=True).strip()
             lines.append(f"用户: {text}\n模型: {resp}\n")
             print(f"用户: {text}\n模型: {resp}\n", flush=True)

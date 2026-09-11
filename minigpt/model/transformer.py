@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import math
 from typing import Optional, Tuple
 from transformers import PreTrainedModel, PretrainedConfig, AutoTokenizer
 from minigpt.model.attention import MultiHeadAttention, FlashMultiHeadAttention
@@ -156,12 +157,30 @@ class GPTConfig(PretrainedConfig):
         self.n_heads = kwargs.get('n_heads', 12)
         self.qkv_bias = kwargs.get('qkv_bias', False)
         self.flash_attn = kwargs.get('flash_attn', False)
+        # 初始化标准差。transformers 5.x 的 PretrainedConfig 不再自带 initializer_range，
+        # 必须显式声明，否则 _init_weights 拿不到统一来源（默认 0.02，与 GPT-2/LLaMA 一致）。
+        self.initializer_range = kwargs.get('initializer_range', 0.02)
         # 前沿架构开关（默认关闭以兼容旧 checkpoint，开启即前沿配置）
         self.use_swiglu = kwargs.get('use_swiglu', False)
         self.qkv_merged = kwargs.get('qkv_merged', False)
         self.tie_word_embeddings = kwargs.get('tie_word_embeddings', False)
         self.use_checkpoint = kwargs.get('use_checkpoint', False)
         super().__init__(**kwargs)
+        self._validate()
+
+    def _validate(self):
+        """结构合法性校验：尽早失败，避免在 attention 里才炸出难懂的 reshape 错误。
+
+        注意：PretrainedConfig 不会调用 `__post_init__`（已核对 transformers 5.1 源码），
+        所以这里显式从 `__init__` 调用，否则校验就是死代码。
+        """
+        assert self.emb_dim % self.n_heads == 0, \
+            f"emb_dim({self.emb_dim}) 必须能被 n_heads({self.n_heads}) 整除"
+        head_dim = self.emb_dim // self.n_heads
+        assert head_dim % 2 == 0, f"head_dim({head_dim}) 必须为偶数（RoPE 按相邻两维配对）"
+        assert self.n_layers >= 1 and self.context_length >= 1 and self.vocab_size >= 1
+        assert self.initializer_range > 0
+
 
 class MiniGPT(PreTrainedModel):
     config_class = GPTConfig
@@ -188,9 +207,49 @@ class MiniGPT(PreTrainedModel):
         self.register_buffer("pos_cis", pos_cis, persistent=False)
         self.final_norm = LayerNorm(config.emb_dim)
         self.out_head = nn.Linear(config.emb_dim, config.vocab_size)
+
+        # ---- 初始化 ----
+        # 真实事故：这里以前没有任何初始化调用。transformers 5.x 的 PreTrainedModel.__init__
+        # 已经不再自动调用 post_init()，而 MiniGPT 也没有 _init_weights，于是全部权重落在
+        # PyTorch 默认值上——nn.Embedding 是 N(0,1) 而不是 N(0, 0.02²)，logits 尺度被放大约
+        # 50 倍（实测 std 22.7 vs 0.5），softmax 在初始化即饱和：随机 token 的首个 batch
+        # loss 从应有的 ~10.4 变成 ~397，真实语料 A/B 里 80 步后仍落后正确初始化 11.8 nats。
+        std = float(config.initializer_range or 0.02)
+        # GPT-2 的做法：残差分支输出投影按 1/sqrt(2*n_layers) 缩放，抑制残差流方差累积
+        self._residual_std = std / math.sqrt(2 * max(1, config.n_layers))
+        for layer in self.decode_layers:
+            layer.atten.Wo._is_residual_out = True
+            ffn_out = layer.ffn.down_proj if config.use_swiglu else layer.ffn.layers[-1]
+            ffn_out._is_residual_out = True
+        # post_init 会遍历子模块执行 _init_weights（并完成 HF 侧其余登记）
+        self.post_init()
+
         if config.tie_word_embeddings:
             # 权重共享：输入嵌入与输出头共用同一份权重，显著减少参数量（输出头偏置仍独立）
             self.out_head.weight = self.token_emb.weight
+
+    def _init_weights(self, module):
+        """HF 初始化钩子（由 post_init -> initialize_weights 逐模块调用）。"""
+        std = float(getattr(self.config, "initializer_range", None) or 0.02)
+        if isinstance(module, nn.Linear):
+            target = self._residual_std if getattr(module, "_is_residual_out", False) else std
+            nn.init.normal_(module.weight, mean=0.0, std=target)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=std)
+
+    def get_input_embeddings(self):
+        return self.token_emb
+
+    def set_input_embeddings(self, value):
+        self.token_emb = value
+
+    def get_output_embeddings(self):
+        return self.out_head
+
+    def set_output_embeddings(self, new_embeddings):
+        self.out_head = new_embeddings
 
     def forward(self,
                 inputs:Optional[torch.Tensor]=None,
@@ -227,9 +286,17 @@ class MiniGPT(PreTrainedModel):
         x = self.drop_emb(x)
 
         # 支持注意力掩码计算（1=有效，0=填充）
+        # 形状约定：attention_mask 必须覆盖**完整 key 长度**（已缓存长度 + 本步输入长度），
+        # 因为注意力偏置是加在 (q, k) 得分上的。增量推理时若只传当前 token 的掩码，
+        # 早期位置的 padding 就屏蔽不掉了。
         if attention_mask is not None:
             assert isinstance(attention_mask, torch.Tensor), f"expect torch.Tensor, but got{type(attention_mask)}"
-            assert attention_mask.size() == inputs.size(), f"size of inputs {inputs.size()} and attention_mask {attention_mask.size()} must be the same."
+            past_len = past_kvs[0][0].shape[1] if (use_kv_cache and past_kvs[0] is not None) else 0
+            expect = past_len + seq_len
+            assert attention_mask.dim() == 2 and attention_mask.size(0) == b, \
+                f"attention_mask 应为 (batch, seq_len)，实际 {tuple(attention_mask.size())}"
+            assert attention_mask.size(1) == expect, \
+                f"attention_mask 长度 {attention_mask.size(1)} 必须等于 已缓存 {past_len} + 本步 {seq_len} = {expect}"
             attention_mask = attention_mask_to_additive(attention_mask)
 
         for i, block in enumerate(self.decode_layers):
@@ -246,11 +313,24 @@ class MiniGPT(PreTrainedModel):
     @torch.inference_mode()
     def generate(self, input_ids, max_length=512, eos_token_id=-1,
                  do_sample=False, temperature=1.0, top_k=None, top_p=None,
-                 repetition_penalty=1.0, **kwargs):
+                 repetition_penalty=1.0, attention_mask=None, **kwargs):
+        """自回归生成。
+
+        `eos_token_id` 可以是单个 id，也可以是 id 列表（chat 模型需要同时接受
+        `<|im_end|>` 与 `<|endoftext|>` 两个停止符——qwen2 词表下二者并不相同：
+        im_end=151645、eos=151643，只传 eos 会导致生成永远停不下来）。
+        `max_length` 是**新增** token 数，不是总长度。
+        """
         assert isinstance(max_length, int) and max_length > 0
         eos_reached = torch.zeros(len(input_ids), dtype=torch.bool, device=input_ids.device)
+        if eos_token_id is None:
+            eos_ids = []
+        elif isinstance(eos_token_id, (list, tuple, set)):
+            eos_ids = sorted({int(x) for x in eos_token_id if x is not None and int(x) >= 0})
+        else:
+            eos_ids = [int(eos_token_id)] if int(eos_token_id) >= 0 else []
+        eos_tensor = torch.tensor(eos_ids, dtype=input_ids.dtype, device=input_ids.device) if eos_ids else None
         past_kvs = None
-        attention_mask = None
         use_kv_cache = kwargs.pop('use_kv_cache', True)
 
         for _ in range(max_length):
@@ -260,7 +340,12 @@ class MiniGPT(PreTrainedModel):
             else:
                 # 不使用缓存时，每次都对最后 context_length 个 token 完整前向
                 step_input = input_ids[:, -self.context_length:]
-            output = self(step_input, attention_mask=attention_mask, use_kv_cache=use_kv_cache,
+            # attention_mask 需与「已缓存长度 + 本步长度」对齐；随生成同步增长（新 token 视为有效）
+            step_mask = attention_mask
+            if attention_mask is not None:
+                past_len = 0 if past_kvs is None else past_kvs[0][0].shape[1]
+                step_mask = attention_mask[:, :past_len + step_input.shape[1]]
+            output = self(step_input, attention_mask=step_mask, use_kv_cache=use_kv_cache,
                           past_kvs=past_kvs, return_dict=True, **kwargs)  # shape: batch, n_tokens, vocab_size
             past_kvs = output["past_key_values"] if use_kv_cache else None
             # 只取每个序列最后一个token的输出向量作为logits, shape变为: batch, vocab_size
@@ -271,8 +356,12 @@ class MiniGPT(PreTrainedModel):
                 logits, do_sample=do_sample, temperature=temperature,
                 top_k=top_k, top_p=top_p)
             input_ids = torch.cat((input_ids, next_token_ids), dim=1)
+            if attention_mask is not None:
+                attention_mask = torch.cat(
+                    (attention_mask, attention_mask.new_ones((attention_mask.size(0), 1))), dim=1)
             # 更新 eos_reached
-            eos_reached |= (next_token_ids.squeeze(-1) == eos_token_id)
+            if eos_tensor is not None:
+                eos_reached |= torch.isin(next_token_ids.squeeze(-1), eos_tensor)
             if eos_reached.all():
                 break
 

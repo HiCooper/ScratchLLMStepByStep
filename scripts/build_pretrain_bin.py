@@ -3,7 +3,7 @@
 用法：
     python scripts/build_pretrain_bin.py build \
         --corpus-jsonl dataset/pretrain_t2t_mini.jsonl \
-        --tokenizer-dir models/tokenizer_qwen2 \
+        --tokenizer-dir models/tokenizer_v3 \
         --out-bin dataset/bins/pretrain_qwen.bin \
         --max-lines 300000
     python scripts/build_pretrain_bin.py info --bin dataset/bins/pretrain_qwen.bin

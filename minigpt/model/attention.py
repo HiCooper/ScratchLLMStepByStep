@@ -135,8 +135,13 @@ class MultiHeadAttention(nn.Module):
 
         # 加法掩码：因果掩码（仅完整前向需要，增量时 q 只有最新 token，天然看不到未来）
         # 与 padding 掩码合并成一份偏置，一次性加到得分上，避免 masked_fill。
+        #
+        # 真实事故：这里曾经用 `if not use_kv_cache` 判断。但 generate() 走 KV cache 时，
+        # 第一步喂的是**完整 prompt**（prefill），此时 use_kv_cache=True 却不加因果掩码，
+        # 导致整段 prompt 被双向注意力处理、被污染的 K/V 进入缓存，最后位置 logits 与
+        # 正确因果前向相差 ~1.26（相对 3%）。正确的判据是"本次前向有没有 past_kv"。
         additive_mask = None
-        if not use_kv_cache:
+        if past_k is None:
             # 序列长度通常 = context_length，直接用预计算 buffer；超出时(长 prompt 全量前向)动态生成，
             # 否则因果掩码尺寸与 pos_cis 不一致，会在加分处报 shape 不匹配。
             if num_queries <= self.causal_mask.shape[0]:
@@ -212,8 +217,10 @@ class FlashMultiHeadAttention(MultiHeadAttention):
         dropout_rate = self.dropout.p if self.training else 0.0
         if flash_attn_func is None:
             raise ImportError("使用 FlashMultiHeadAttention 需要安装 flash-attn 包。")
-        # 增量时 q 只有最新 1 个 token，天然看不到未来，无需 causal；完整前向才需要 causal。
-        causal = not use_kv_cache
+        # 因果性判据同 MultiHeadAttention：只要本次前向没有 past_kv（即 prefill），就必须 causal；
+        # 增量时 q 只有最新 1 个 token，天然看不到未来，且 flash-attn 的 causal 在 q_len<k_len 时
+        # 是"右下对齐"，用在这里反而是错的。
+        causal = past_k is None
         # 注：flash_attn 不支持任意 padding 掩码，SFT(需要 padding)应使用非 flash 注意力。
         context_vecs = flash_attn_func(q, k, v, dropout_p=dropout_rate, softmax_scale=self.head_dim ** -0.5, causal=causal)
         context_vecs = context_vecs.to(dtype=input_dtype)

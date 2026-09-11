@@ -22,10 +22,10 @@ from transformers import AutoTokenizer
 from minigpt.config import (ModelConfig, TrainConfig, DataConfig, PathConfig,
                             add_cli_overrides, as_nested_dict, build_run_config,
                             dump_run_config, ROOT)
-from minigpt.data.pretrain_dataset import TokenBinDataset
+from minigpt.data.pretrain_dataset import (TokenBinDataset, split_train_eval_blocks,
+                                           validate_bin_tokenizer)
 from minigpt.model.transformer import GPTConfig, MiniGPT
 from minigpt.train.trainer import Trainer
-from torch.utils.data import random_split
 
 
 def parse_args():
@@ -57,6 +57,7 @@ def main():
         emb_dim=mc.emb_dim, n_layers=mc.n_layers, n_heads=mc.n_heads,
         context_length=mc.context_length, vocab_size=vocab_size,
         drop_rate=mc.drop_rate, qkv_bias=mc.qkv_bias,
+        qkv_merged=mc.qkv_merged,
         tie_word_embeddings=mc.tie_word_embeddings,
         use_swiglu=mc.use_swiglu, use_checkpoint=mc.use_checkpoint,
         flash_attn=mc.flash_attn,
@@ -65,14 +66,23 @@ def main():
 
     # 数据
     ds = TokenBinDataset(dc.tokenized_bin, mc.context_length, dc.bin_meta)
-    eval_len = min(int(len(ds) * dc.eval_ratio), 512)
-    train_len = len(ds) - eval_len
-    generator = torch.Generator().manual_seed(tc.seed)
-    train_set, eval_set = random_split(ds, [train_len, eval_len],
-                                       generator=generator)
+    # 词表一致性校验：meta.vocab_size 必须与 tokenizer 相符（否则 embedding 静默错配）
+    bin_info = validate_bin_tokenizer(dc.tokenized_bin, tokenizer, dc.bin_meta)
+    # 验证集 = 均匀分布的若干块，每块双端对齐文档边界：
+    #   - 随机抽窗口会让同一文档前半进训练集、后半进验证集（文档中位仅 ~151 token，
+    #     窗口 512 平均横跨 2.6 篇文档），eval_loss 偏乐观；
+    #   - 只取尾部连续块则失去代表性（本语料按领域排序，尾部整段是英文选择题）。
+    eos_id = (ds.meta or {}).get("eos_id")
+    if eos_id is None:
+        eos_id = tokenizer.eos_token_id
+    train_set, eval_set, split_info = split_train_eval_blocks(
+        ds, eval_ratio=dc.eval_ratio, eos_id=eos_id, n_blocks=dc.eval_blocks)
     if rank0:
         print(f"[pretrainer] ds_rows={len(ds)} train={len(train_set)} eval={len(eval_set)} "
               f"vocab={vocab_size} params={sum(p.numel() for p in model.parameters())/1e6:.1f}M")
+        print(f"[pretrainer] split={split_info['split']} blocks={split_info['n_blocks']} "
+              f"eval_rows={split_info['eval_rows']} actual_eval_ratio={split_info['actual_eval_ratio']} "
+              f"bin_vocab={bin_info.get('bin_vocab')}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=tc.learning_rate,
                                   weight_decay=tc.weight_decay)
@@ -139,6 +149,9 @@ def main():
     if rank0:
         metrics = getattr(trainer, "final_metrics", {}) or {}
         metrics["config"] = as_nested_dict(cfg)
+        # 记录切分口径与语料元信息：不同切分/不同 bin 的 loss 不可直接比较
+        metrics["data_split"] = split_info
+        metrics["bin_meta"] = bin_info
         with open(os.path.join(pc.output_dir, "metrics.json"), "w", encoding="utf-8") as f:
             json.dump(metrics, f, ensure_ascii=False, indent=2)
         print(f"[pretrainer] metrics -> {os.path.join(pc.output_dir, 'metrics.json')}")

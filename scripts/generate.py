@@ -3,7 +3,7 @@
 用法：
     python scripts/generate.py \
         --checkpoint models/checkpoints/minigpt_pretrain/checkpoint-2000.pth \
-        --tokenizer-dir models/tokenizer_qwen2 \
+        --tokenizer-dir models/tokenizer_v3 \
         --prompt "什么是AI？" --chat --max-new-tokens 128 \
         --do-sample --temperature 0.7 --top-k 50 --top-p 0.9 --repeat-penalty 1.1
     # 或 --prompt-file prompts.txt（每行一条）；或 --interactive
@@ -41,7 +41,7 @@ def build_prompt(tokenizer, text, chat):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True)
-    ap.add_argument("--tokenizer-dir", default="models/tokenizer_qwen2")
+    ap.add_argument("--tokenizer-dir", default="models/tokenizer_v3")
     ap.add_argument("--prompt", action="append", default=[])
     ap.add_argument("--prompt-file", default=None)
     ap.add_argument("--interactive", action="store_true")

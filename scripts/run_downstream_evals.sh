@@ -66,8 +66,11 @@ log "=== 4c) 同切分 ppl 对比：$PPL_CKPTS ==="
 for ck in $PPL_CKPTS; do
   [ -f "$ck" ] || { log "跳过不存在的 $ck"; continue; }
   name=$(basename "$(dirname "$ck")")
+  # --split val：评估 bin 尾部连续、对齐文档边界的验证集（与训练同一口径）。
+  # 旧写法 --max-rows 512 取的是 bin 最前面的窗口，若该 bin 参与过训练，
+  # 得到的是训练 loss，会严重高估泛化（历史 README 结论即因此失真）。
   python3 -u scripts/evaluate_pretrain.py --checkpoint "$ck" --tokenizer-dir "$TOK" \
-    --bin "$BIN" --batch-size 8 --max-rows 512 \
+    --bin "$BIN" --split val --batch-size 8 \
     --output "models/checkpoints/ppl_${name}.json" || log "4c $name 失败（继续）"
 done
 

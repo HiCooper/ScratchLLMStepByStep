@@ -46,7 +46,10 @@ class Trainer:
         self.step = 0
         self.cur_epoch = 0
         self.total_steps = 0
-        self.train_loss_acc = 0
+        self.micro_loss_sum = 0.0   # 自上次 eval 以来各 micro-batch loss 之和
+        self.micro_count = 0        # 自上次 eval 以来的 micro-batch 数
+        self.last_train_loss = None      # 最近一次窗口的 train_loss（审计用）
+        self.last_train_loss_count = 0   # 该窗口实际参与的 micro-batch 数
         self.last_grad_norm = 0.0
         self.ddp = False
         self.rank = -1
@@ -108,14 +111,30 @@ class Trainer:
         self.steps_per_epoch = len(self.train_loader)
         # 梯度累积下，优化器更新次数 = 微批次数 / 累积步数（用于 LR 调度与总步数）
         self.updates_per_epoch = self.steps_per_epoch // self.gradient_accumulation_steps
+        if self.num_epochs <= 0 and self.max_updates <= 0:
+            # 真实事故：num_train_epochs 缺省为 0 时 train() 静默跑 0 步，而且不报错
+            raise ValueError(
+                "num_train_epochs<=0 且未指定 max_steps：训练会一步都不跑。"
+                "请设置 --train_epochs>=1 或 --train_max_steps>0")
+        if self.updates_per_epoch <= 0:
+            print(f"[trainer] 警告：每个 epoch 只有 {self.steps_per_epoch} 个 batch，"
+                  f"不足 gradient_accumulation_steps={self.gradient_accumulation_steps}，"
+                  f"需要靠 max_steps 驱动；请同时设置 --train_max_steps")
         self.total_steps = self.num_epochs * self.updates_per_epoch
         print(f'init train_loader steps: {len(self.train_loader)}, eval_loader: {len(self.eval_loader)}') if self.verbose else None
 
     def _unwrap(self):
-        """取出真实模型：兼容 DistributedDataParallel 与 torch.compile(OptimizedModule)。"""
-        model = self.model
-        model = model.module if isinstance(model, DistributedDataParallel) else model
-        return getattr(model, "_orig_mod", model)
+        """取出真实模型：兼容 DistributedDataParallel 与 torch.compile(OptimizedModule)。
+
+        真实事故：train() 里先 DDP 再 compile，于是嵌套顺序是
+        `OptimizedModule(DistributedDataParallel(MiniGPT))`。原来先判 `isinstance(DDP)`
+        对最外层 OptimizedModule 为 False，再取 `_orig_mod` 就拿到了 DDP 本身，保存出来的
+        state_dict 键全部带 `module.` 前缀（实测 `module.token_emb.weight`）——multi-GPU
+        （预设里 torch_compile=True）产出的 checkpoint 会被 checkpoint.py 判成"缺少关键
+        权重"而无法加载、也无法续训。因此必须先剥 compile 外壳，再剥 DDP。
+        """
+        model = getattr(self.model, "_orig_mod", self.model)   # 先剥 torch.compile 外壳
+        return model.module if isinstance(model, DistributedDataParallel) else model
 
     def _save_model(self, checkpoint_path, epoch):
         model, optimizer, step = self.model, self.optimizer, self.step
@@ -143,7 +162,7 @@ class Trainer:
     def _load_from_checkpoint(self):
         # 在分布式训练的多GPU环境中，map_location可以确保模型的参数和优化器的状态被加载到正确的GPU上，避免出现设备不匹配而报错。
         model, optimizer, device = self.model, self.optimizer, self.device
-        local_model = model.module if isinstance(model, DistributedDataParallel) else model
+        local_model = self._unwrap()
         checkpoint = torch.load(self.last_checkpoint_path, map_location=device, weights_only=False)
         local_model.load_state_dict(checkpoint['model_state'])
         if optimizer != None:
@@ -202,11 +221,31 @@ class Trainer:
         print(f"train over, steps: {self.step}") if self.verbose else None
 
     @staticmethod
+    def _ddp_kwargs(local_rank=None):
+        """DDP 构造参数：关闭每 forward 的 buffer 广播。
+
+        模型 buffer 全是常量（每层 causal_mask 512×512×4B，10 层合计 10.5MB），
+        DDP 默认每个 forward 都广播一遍，纯属浪费带宽外加一次集合通信同步。
+        torch 2.13 起 `broadcast_buffers` 已废弃，优先用 `forward_sync_buffers`。
+        """
+        import inspect as _inspect
+        kwargs = {}
+        if local_rank is not None:
+            kwargs["device_ids"] = [local_rank]
+        if "forward_sync_buffers" in _inspect.signature(
+                DistributedDataParallel.__init__).parameters:
+            kwargs["forward_sync_buffers"] = False
+        else:
+            kwargs["broadcast_buffers"] = False
+        return kwargs
+
+    @staticmethod
     def _wrap_model_with_ddp(model, local_rank):
         # 位置编码用的是复数，而nccl不支持复数形式，此变量并不要求在多进程中保持一致，所以暂时屏蔽对此变量的同步
         model._ddp_params_and_buffers_to_ignore = {"pos_cis"}
-        model = DistributedDataParallel(model, device_ids=[local_rank])
-        print(f"packaged model with DDP in cuda:{local_rank}")
+        kwargs = Trainer._ddp_kwargs(local_rank)
+        model = DistributedDataParallel(model, **kwargs)
+        print(f"packaged model with DDP in cuda:{local_rank} ({kwargs})")
         return model
     
     def _init_grad_scaler(self):
@@ -218,22 +257,40 @@ class Trainer:
         print(f"init grad scaler: {self.scaler is not None}, amp_dtype: {self.amp_dtype}") if self.verbose else None
 
     def _calc_grad_norm(self):
-        # 计算梯度范数，梯度范数为所有参数平方和的平方根。先为每一层计算梯度范数，再计算所有层合在一起的梯度范数。
-        total_norm = 0.0
-        for name, p in self.model.named_parameters():
-            if p.grad is not None:
-                param_norm = p.grad.data.norm(2)
-                total_norm += param_norm.item() ** 2
-        return total_norm ** 0.5
+        """全局梯度 L2 范数。
+
+        旧实现逐参数 `p.grad.norm(2).item()`，每个参数一次 host-device 同步
+        （~100 个参数即 ~100 次 .item()），在 torch.compile 下还会反复打断图。
+        这里用 `torch._foreach_norm` 批量算各参数范数，只在最后做一次同步。
+        """
+        grads = [p.grad.detach() for p in self.model.parameters() if p.grad is not None]
+        if not grads:
+            return 0.0
+        norms = torch._foreach_norm(grads, 2)
+        return float(torch.linalg.vector_norm(torch.stack(norms)))
 
     def _accumulate_training_loss(self, loss):
+        """累计一个 micro-batch 的 loss（本地累加，跨 rank 平均推迟到需要时）。
+
+        记账用 (sum, count) 而不是"除以 eval_steps×accum"：后者在最后一个不完整的
+        eval 窗口、以及 batch 数不能被 accumulation 整除时会系统性偏小
+        （实测残窗 train_loss=1.418，真值约 2.85）。
+
+        旧实现每个 micro-batch 都做一次 `dist.reduce`（还直接原地写在带梯度的张量上），
+        即每一步一次集合通信同步点；本方法现在只做本地累加，跨卡平均由
+        `_global_mean_loss()` 在 eval/结束时一次性完成。
+        """
+        self.micro_loss_sum += float(loss.detach())
+        self.micro_count += 1
+
+    def _global_mean_loss(self):
+        """跨 rank 的 micro-batch 平均 loss（**所有 rank 都必须调用**，内部含集合通信）。"""
         if not self.ddp:
-            self.train_loss_acc += loss.item()
-            return
-        
-        # 分布式训练下，需要计算所有进程的平均损失来作为训练损失，比单独主进程的损失数据要更平滑
-        dist.reduce(loss, dst=0)
-        self.train_loss_acc += loss.item()/dist.get_world_size()
+            return self.micro_loss_sum / max(1, self.micro_count)
+        t = torch.tensor([self.micro_loss_sum, float(self.micro_count)],
+                         dtype=torch.float64, device=self.device)
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+        return float(t[0] / max(1.0, float(t[1])))
     
     def _record_metrics(self, train_loss, eval_loss, grad_norm, lr):
         # 展示用总步数用 effective_max：领域增量续训时 epochs*每epoch步数 会远大于实际目标
@@ -259,41 +316,67 @@ class Trainer:
 
     @staticmethod
     def _get_dynamic_lr(target_lr, cur_step, warmup_steps, decay_steps):
-        min_lr = target_lr/10
-        if cur_step < warmup_steps:
+        """线性 warmup + 余弦退火。`cur_step` 是**即将执行的更新序号（1-based）**。
+
+        真实事故：调用方以前传"已完成的更新数"，于是第一次更新时 cur_step=0 →
+        warmup 分支算出 lr=0 → `_adjust_lr` 走 `if lr <= 0: return target_lr` 直接返回，
+        **没有写回 param_group**，优化器保持初始 lr（=峰值）：warmup 首步被整段跳过，
+        fp16 下很容易打出 loss 尖峰。另外 `warmup_steps == decay_steps` 时
+        `(cur-warmup)/(decay-warmup)` 会 ZeroDivisionError。
+        """
+        min_lr = target_lr / 10
+        warmup_steps = max(0, int(warmup_steps))
+        decay_steps = max(1, int(decay_steps))
+        if warmup_steps > 0 and cur_step <= warmup_steps:
             return target_lr * (cur_step / warmup_steps)
-        if cur_step > decay_steps:
+        if cur_step >= decay_steps:
             return min_lr
-        
-        step_ratio = (cur_step - warmup_steps)/(decay_steps-warmup_steps)
-        cos_scope = 0.5 * (1 + math.cos(math.pi * step_ratio))
+        # progress 以 cur_step-1 为基准：warmup_steps=0 时第一次更新恰好等于 target_lr
+        progress = (cur_step - 1 - warmup_steps) / max(1, decay_steps - 1 - warmup_steps)
+        progress = min(1.0, max(0.0, progress))
+        cos_scope = 0.5 * (1 + math.cos(math.pi * progress))
         return min_lr + (target_lr - min_lr) * cos_scope
 
     def _adjust_lr(self):
-        lr = self._get_dynamic_lr(self.target_lr, self.step, self.warmup_steps, self.total_steps )
-        if lr <= 0: return self.target_lr
+        """按"即将执行的第 self.step+1 次更新"设置 LR 并返回。
+
+        horizon 用 `effective_max`（本次 run 真正要跑的更新数），而不是 `total_steps`
+        （epochs × 每 epoch 更新数）：增量续训 / `--train_max_steps` 下后者可能大一个
+        数量级，余弦永远走不完，末端 LR 停在接近峰值处。
+        """
+        horizon = self.effective_max or self.total_steps
+        lr = self._get_dynamic_lr(self.target_lr, self.step + 1, self.warmup_steps, horizon)
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = lr
         return lr
-            
+
 
     def _check_and_evaluate(self, lr):
-        if (self.step + 1) % self.eval_steps != 0:
+        # self.step 是在调用本方法**之前**自增的，所以这里直接按已完成步数取模。
+        # （旧写法 `(self.step + 1) % eval_steps` 使首次 eval 只积累了 eval_steps-1
+        #   次更新，train_loss 分母却按 eval_steps 算，首个窗口系统性偏小。）
+        if self.eval_steps <= 0 or self.step % self.eval_steps != 0:
             return
 
+        # 所有 rank 都要参与 loss 的 all_reduce；只有 rank0 真正跑 eval
+        train_loss = self._global_mean_loss()
+        self.last_train_loss = train_loss
+        self.last_train_loss_count = self.micro_count
+        self._reset_loss_acc()
         if self.is_main_process:
-            # 梯度累积下，每个 step 之间会累积多个 micro-batch 的 loss，故分母要乘累积步数
-            train_loss = self.train_loss_acc / (self.eval_steps * self.gradient_accumulation_steps)
             eval_loss = self._evaluate()
             grad_norm = self.last_grad_norm
             self._record_metrics(train_loss, eval_loss, grad_norm, lr)
-            self.train_loss_acc = 0
 
         dist.barrier() if self.ddp else None
 
+    def _reset_loss_acc(self):
+        self.micro_loss_sum = 0.0
+        self.micro_count = 0
+
     def _evaluate(self):
         # 这里不能多进程同步，必须用原始Model
-        model = self.model.module if isinstance(self.model, DistributedDataParallel) else self.model
+        model = self._unwrap()
         model.eval()
         num_batches = len(self.eval_loader)
         total_loss = 0
@@ -311,7 +394,7 @@ class Trainer:
 
     def test(self, dataset):
         """用于对训练的模型进行评估测试"""
-        model = self.model.module if isinstance(self.model, DistributedDataParallel) else self.model
+        model = self._unwrap()
         model.eval()
         dataloader = DataLoader(dataset, batch_size=self.batch_size, collate_fn=self.batch_collator)
         num_batches = len(dataloader)
@@ -345,22 +428,32 @@ class Trainer:
         use_amp = X.device.type == "cuda" and self.amp_dtype is not None
         ctx = torch.amp.autocast('cuda', dtype=self.amp_dtype) if use_amp else nullcontext()
 
-        with ctx:
-            logits = self.model(X, attention_mask=attnmask)
-            loss = f.cross_entropy(logits.flatten(0, 1), Y.flatten())
+        # 梯度累积：只有最后一个 micro-batch 才需要跨卡同步梯度，前面几个用
+        # DDP.no_sync() 跳过 all-reduce（否则累积 N 步就做 N 次通信，梯度通信量 ×N）
+        is_last_micro = (self.micro_step + 1) >= self.gradient_accumulation_steps
+        no_sync = self.model.no_sync() if (self.ddp and not is_last_micro) else nullcontext()
 
-        # 梯度累积：对 loss 按累积步数缩放，多次 backward 后等价于大 batch 的梯度
-        scale = 1.0 / self.gradient_accumulation_steps
-        if use_amp and self.scaler is not None:
-            self.scaler.scale(loss * scale).backward()
-        else:
-            (loss * scale).backward()
+        with no_sync:
+            with ctx:
+                logits = self.model(X, attention_mask=attnmask)
+                loss = f.cross_entropy(logits.flatten(0, 1), Y.flatten())
+
+            # 梯度累积：对 loss 按累积步数缩放，多次 backward 后等价于大 batch 的梯度
+            scale = 1.0 / self.gradient_accumulation_steps
+            if use_amp and self.scaler is not None:
+                self.scaler.scale(loss * scale).backward()
+            else:
+                (loss * scale).backward()
 
         self.micro_step += 1
         if self.micro_step < self.gradient_accumulation_steps:
             return loss, False
 
         # 累积满 gradient_accumulation_steps 次后，执行一次参数更新
+        # 指标钩子在 zero_grad **之前**：直方图需要读到 p.grad（否则 grads/* 永远为空）
+        if self.metrics is not None:
+            self.metrics.before_zero_grad(self.step + 1, tokens=int(X.numel()),
+                                          batch=(X, Y))
         # 梯度范数必须在 optimizer.step / zero_grad 之前计算，否则梯度已被清零、恒为 0
         if use_amp and self.scaler is not None:
             self.scaler.unscale_(self.optimizer)
@@ -445,20 +538,34 @@ class Trainer:
             self.model = torch.compile(self.model, mode=self.compile_mode)
         self.step = min(self.step, self.effective_max) if self.effective_max else self.step
 
-        for epoch in range(last_epoch, self.num_epochs):
+        # epoch 循环上界：真实事故是 `--train_max_steps 200000` 配 `--train_epochs 1`
+        # 时，epoch 循环先结束，训练在 updates_per_epoch 步就静默停下（远少于目标步数）。
+        # 这里按 max_steps 反推所需的 epoch 数，保证"要多少步就跑到多少步"。
+        loop_epochs = self.num_epochs
+        if self.max_updates > 0 and self.updates_per_epoch > 0 \
+                and self.max_updates > self.total_steps:
+            loop_epochs = max(loop_epochs, math.ceil(self.max_updates / self.updates_per_epoch))
+            if self.verbose:
+                print(f"[trainer] max_steps={self.max_updates} 超过 {self.num_epochs} 个 epoch 的 "
+                      f"{self.total_steps} 次更新，自动把 epoch 上界提到 {loop_epochs}")
+
+        for epoch in range(last_epoch, loop_epochs):
             if self.effective_max and self.step >= self.effective_max:
                 break
             self._train_epoch(epoch)
 
-        # 结束：主进程做最终评估并保存 final.pt（含完整 RNG/缩放器状态）
+        # 结束：先在所有 rank 上完成 loss 的集合通信，主进程再做最终评估与落盘
+        final_train_loss = self._global_mean_loss() if self.step > 0 else None
         if self.is_main_process:
-            if self.total_steps > 0:
+            final_eval = None
+            if self.step > 0:
                 final_eval = self._evaluate()
+                tail_train_loss = final_train_loss
                 self.final_metrics = {
                     "step": self.step,
                     "epoch": last_epoch + max(0, self.num_epochs - last_epoch - 1)
                              if self.step else last_epoch,
-                    "train_loss": self.train_loss_acc / max(1, self.eval_steps),
+                    "train_loss": tail_train_loss,
                     "eval_loss": final_eval,
                     "perplexity": float(math.exp(min(final_eval, 80.0))),
                     "best_eval_loss": self.best_eval_loss,
@@ -472,7 +579,7 @@ class Trainer:
                 print(f"{self.cur_time()} final checkpoint saved: "
                       f"{os.path.join(self.output_dir, 'final.pt')}")
             if self.metrics is not None:
-                self.metrics.on_final(self.step, final_eval if self.total_steps > 0 else None)
+                self.metrics.on_final(self.step, final_eval)
             if self.writer is not None:
                 self.writer.flush()
                 self.writer.close()
@@ -484,7 +591,7 @@ class Trainer:
     
     def predict(self, tokenizer, input_text, max_length=100):
         inputs = torch.tensor([tokenizer.encode(input_text)]).to(self.device)
-        model = self.model.module if isinstance(self.model, DistributedDataParallel) else self.model
+        model = self._unwrap()
         response_ids = model.generate(inputs, max_length=max_length, eos_token_id=tokenizer.eos_token_id, use_kv_cache=True)
         new_tokens = response_ids[0][inputs.shape[1]:]
         return tokenizer.decode(new_tokens.tolist(), skip_special_tokens=True).strip()

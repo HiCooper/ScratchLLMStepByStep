@@ -44,6 +44,7 @@ class MetricsLogger:
         self._steps = deque(maxlen=50)
         self._times = deque(maxlen=50)
         self._graph_logged = False
+        self._graph_failed = False
         self._probe_ids = None
         self._last_hist_step = -10 ** 9
         self._last_embed_step = -10 ** 9
@@ -76,23 +77,37 @@ class MetricsLogger:
             if span > 0:
                 self.writer.add_scalar(self._t("train/tokens_per_sec"), total / span, step)
 
+    def before_zero_grad(self, step, tokens, batch=None):
+        """在 `optimizer.zero_grad()` **之前**调用。
+
+        真实事故：直方图以前挂在 `on_train_step` 上，而 trainr 是先
+        `zero_grad(set_to_none=True)` 再调用它，于是 `p.grad` 恒为 None——
+        TensorBoard 里 `grads/*` 从始至终一个标签都没有（README 的面板名不副实），
+        而测试只断言了 `weights/*` 所以没被发现。
+        """
+        if self.log_hist_every and step % self.log_hist_every == 0:
+            self.log_histograms(step)
+        if tokens:
+            self._tokens_per_sec(step, int(tokens))
+        if batch is not None:
+            x = batch[0] if isinstance(batch, (tuple, list)) else batch
+            if torch.is_tensor(x):
+                if self._probe_ids is None:
+                    self._probe_ids = x[:1, : min(32, x.shape[-1])].detach().to(self.device)
+                if self.log_graph and not self._graph_logged and not self._graph_failed:
+                    self.log_graph_once(x[:1, : min(32, x.shape[-1])])
+
     # ------------------------------------------------------------- train step
     def on_train_step(self, step, loss, lr, grad_norm, batch=None):
-        """每个参数更新步调用。batch 为 (X, Y) 或 X，用于图像/模型图探针。"""
+        """每个参数更新步调用（此时梯度已被清零，只做标量记录）。"""
         self.writer.add_scalar(self._t("train/loss"), float(loss), step)
         self.writer.add_scalar(self._t("train/lr"), float(lr), step)
         if grad_norm is not None:
             self.writer.add_scalar(self._t("train/grad_norm"), float(grad_norm), step)
-
         if batch is not None:
             x = batch[0] if isinstance(batch, (tuple, list)) else batch
             if torch.is_tensor(x) and self._probe_ids is None:
                 self._probe_ids = x[:1, : min(32, x.shape[-1])].detach().to(self.device)
-            if self.log_graph and not self._graph_logged and torch.is_tensor(x):
-                self.log_graph_once(x[:1, : min(32, x.shape[-1])])
-
-        if self.log_hist_every and step % self.log_hist_every == 0:
-            self.log_histograms(step)
 
     # --------------------------------------------------------------- histograms
     def log_histograms(self, step):
@@ -111,7 +126,7 @@ class MetricsLogger:
 
     # ------------------------------------------------------------------ graph
     def log_graph_once(self, dummy_ids):
-        if self._graph_logged:
+        if self._graph_logged or self._graph_failed:
             return
         try:
             model = self._unwrap()
@@ -121,7 +136,10 @@ class MetricsLogger:
             model.train(was_training)
             self._graph_logged = True
         except Exception as exc:  # noqa: BLE001
-            print(f"[metrics] add_graph skipped: {exc}")
+            # 失败也要置位：否则每一步都会重新 trace 一次（旧实现把 _graph_logged
+            # 只写在成功分支里，add_graph 抛异常时会反复重试拖慢训练）
+            self._graph_failed = True
+            print(f"[metrics] add_graph skipped（不再重试）: {exc}")
 
     # -------------------------------------------------------------- embeddings
     def log_embedding(self, step):

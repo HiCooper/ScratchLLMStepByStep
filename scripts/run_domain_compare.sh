@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.."
 TOK="${TOK:-models/tokenizer_v3}"
 TAG="${TAG:-domain}"
 DOM_BIN="${DOM_BIN:-dataset/bins/code_domain.bin}"
-MAX_ROWS="${MAX_ROWS:-512}"
+MAX_ROWS="${MAX_ROWS:-512}"   # 保留兼容：新口径由 --split val 决定评估窗口
 # 领域基座（本 run）与对照基座（增量续训的起点）
 DOM_CKPT="${DOM_CKPT:-models/checkpoints/pretrain_${TAG}_code/final.pt}"
 [ -f "$DOM_CKPT" ] || DOM_CKPT="models/checkpoints/pretrain_${TAG}/final.pt"
@@ -23,8 +23,9 @@ log() { echo "[$(date '+%F %T')] $*"; }
 
 run_one() {   # $1=checkpoint $2=bin $3=输出前缀
   [ -f "$1" ] || { log "跳过不存在的 $1"; return 0; }
+  # 双口径对比都走 --split val（尾部连续 + 文档边界对齐），否则比的是训练集 loss
   python3 -u scripts/evaluate_pretrain.py --checkpoint "$1" --tokenizer-dir "$TOK" \
-    --bin "$2" --batch-size 8 --max-rows "$MAX_ROWS" \
+    --bin "$2" --split val --batch-size 8 \
     --output "models/checkpoints/ppl_$3.json" || log "评估失败：$1 / $2"
 }
 
