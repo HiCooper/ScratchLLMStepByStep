@@ -80,6 +80,11 @@ class TrainConfig:
     mixed_precision_dtype: str = "float16"   # float16 | bfloat16 | none
     seed: int = 123
     num_workers: int = 0
+    # NCCL 超时（秒）：必须覆盖 rank0 独占的完整 eval + checkpoint 落盘（都在 barrier 内），
+    # 120s 会在慢盘/大验证集时以 NCCL 超时打挂整轮训练
+    ddp_timeout_seconds: int = 1800
+    # 打开后强制 cudnn.deterministic=True/benchmark=False（严格复现优先于吞吐）
+    deterministic_cudnn: bool = False
     # 预训练固定形状下启用可显著提速（+66% 实测）；SFT 变长序列不建议。
     # 生产预设（pipeline.sh / train_pretrain_resilient.sh）默认开启，这里保守取 False。
     torch_compile: bool = False

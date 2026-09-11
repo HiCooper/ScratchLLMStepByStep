@@ -267,9 +267,9 @@ packages 级说明与**训练过程指标（标量/直方图/图像/模型图/�
 ```bash
 python scripts/build_pretrain_bin.py build \
     --corpus-jsonl dataset/pretrain_t2t_mini.jsonl \
-    --tokenizer-dir models/tokenizer_qwen2 \
-    --out-bin dataset/bins/pretrain_qwen.bin --max-lines 600000
-python scripts/build_pretrain_bin.py info --bin dataset/bins/pretrain_qwen.bin
+    --tokenizer-dir models/tokenizer_v3 \
+    --out-bin dataset/bins/pretrain_v3_full.bin
+python scripts/build_pretrain_bin.py info --bin dataset/bins/pretrain_v3_full.bin
 ```
 自动按词表选择 uint16/uint32 并生成 `.meta.json`；`TokenBinDataset` 按元数据自动识别。
 
@@ -277,9 +277,10 @@ python scripts/build_pretrain_bin.py info --bin dataset/bins/pretrain_qwen.bin
 ```bash
 # 单卡
 python3 -m minigpt.train.pretrainer \
-    --model_emb_dim 384 --model_n_layers 8 --model_n_heads 8 --model_context_length 512 \
-    --train_batch_size 8 --train_warmup_steps 800 --train_eval_steps 400 --train_save_steps 2000 \
-    --paths_output_dir models/checkpoints/pretrain_qwen_v1
+    --model_emb_dim 512 --model_n_layers 10 --model_n_heads 8 --model_context_length 512 \
+    --train_batch_size 8 --train_warmup_steps 300 --train_eval_steps 2000 --train_save_steps 4000 \
+    --train_torch_compile True \
+    --paths_output_dir models/checkpoints/pretrain_v3
 # 多卡 DDP
 NPROC=2 bash scripts/pretrain_start.sh --paths_output_dir models/checkpoints/pretrain_ddp
 ```
@@ -288,8 +289,8 @@ NPROC=2 bash scripts/pretrain_start.sh --paths_output_dir models/checkpoints/pre
 
 ### 采样推理
 ```bash
-python scripts/generate.py --checkpoint models/checkpoints/pretrain_qwen_v1/final.pt \
-    --tokenizer-dir models/tokenizer_qwen2 --prompt "什么是AI？" --chat \
+python scripts/generate.py --checkpoint models/checkpoints/pretrain_v3/final.pt \
+    --tokenizer-dir models/tokenizer_v3 --prompt "什么是AI？" --chat \
     --do-sample --temperature 0.8 --top-k 50 --top-p 0.9 --repeat-penalty 1.1 \
     --max-new-tokens 200
 # 或 --interactive / --prompt-file
@@ -322,8 +323,11 @@ setsid nohup bash scripts/run_code_domain.sh > models/checkpoints/domain_pipelin
 `ppl_*.json`（多基座同切分对比），报告汇总在 `models/checkpoints/TRAINING_REPORT.md`。
 
 ### 说明
-- `models/tokenizer_qwen2`：从 ModelScope 获取的 Qwen2.5-0.5B tokenizer（151,665 词表，现代中文 BPE，
-  自带 `<|im_start|>/<|im_end|>` chat 模板），训练侧由此推导词表大小；默认启用输入/输出嵌入权重共享（`--model_tie_word_embeddings`）。
+- `models/tokenizer_v3`：项目**唯一**使用的分词器（32,000 词表中文 BPE，由 `scripts/train_tokenizer.py`
+  在 notebook 01 训练得到，自带 `<|im_start|>/<|im_end|>` chat 模板）。训练侧由它推导词表大小，
+  并与 `.bin` 的 `meta.vocab_size` 做一致性校验；默认启用输入/输出嵌入权重共享（`--model_tie_word_embeddings`）。
+  （早期实验用的 `tokenizer_qwen2`（151k 词表）已随其产物一并清理：151k 词表会把 70%+ 参数花在
+  embedding 上，实测 512/10/8 下从 47.9M 涨到 109.3M，不划算。）
 - RTX 20 系（Turing）不支持 FlashAttention-2，默认 `flash_attn=False`。
 
 ## 🏋️ 实测训练结果（单卡 RTX 2060 6GB，2026-09）

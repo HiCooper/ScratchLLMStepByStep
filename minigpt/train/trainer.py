@@ -9,7 +9,7 @@ from contextlib import nullcontext
 import torch.distributed as dist
 from datetime import timedelta
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.data import DataLoader, DistributedSampler, random_split
+from torch.utils.data import DataLoader, DistributedSampler, RandomSampler
 from torch.distributed import init_process_group, destroy_process_group
 from minigpt.model.transformer import GPTConfig, MiniGPT
 from minigpt.train import checkpoint_io
@@ -53,6 +53,10 @@ class Trainer:
         self.loss_acc = LossAccumulator()
         self.last_grad_norm = 0.0
         self.ddp = False
+        self.seed = int(train_args.get("seed", 123))
+        self.ddp_timeout_seconds = int(train_args.get("ddp_timeout_seconds", 1800) or 1800)
+        self.train_sampler = None
+        self._train_generator = None
         self.rank = -1
         self.local_rank = -1
         self.is_main_process = True
@@ -74,15 +78,38 @@ class Trainer:
         self.extra_ckpt = None   # 附加到每个 checkpoint 的字典（如 config）
         self.torch_compile = bool(train_args.get("torch_compile", False))
         self.num_workers = int(train_args.get("num_workers", 0))
+        self.deterministic_cudnn = bool(train_args.get("deterministic_cudnn", False))
         self.compile_mode = train_args.get("compile_mode", "default")
         self.metrics = None      # 可选的 MetricsLogger（tensorboard 直方图/图像/投影/模型图）
         self.tokenizer = None    # 可选：供 metrics 生成样本文本与嵌入 metadata
 
     def set_seed(self, seed):
+        """设置全局随机种子。
+
+        注意：数据顺序**不依赖**这里的全局 RNG（训练 sampler 用独立 generator，
+        按 seed+epoch 播种），因此续训时恢复 RNG 状态不会再影响"跳过哪些样本"。
+
+        `cudnn.deterministic/benchmark` 由 `deterministic_cudnn` 控制：默认关闭以保留吞吐
+        （本模型全是 matmul/attention，cudnn benchmark 收益本就有限），需要严格复现时打开。
+        """
+        self.seed = int(seed)
         torch.manual_seed(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False  
-        print(f"set seed to {seed}") if self.verbose else None
+        torch.backends.cudnn.deterministic = bool(self.deterministic_cudnn)
+        torch.backends.cudnn.benchmark = not bool(self.deterministic_cudnn)
+        print(f"set seed to {seed} (cudnn.deterministic={self.deterministic_cudnn})") \
+            if self.verbose else None
+
+    def set_train_epoch(self, epoch):
+        """固定本 epoch 的数据顺序。
+
+        - DDP：`DistributedSampler.set_epoch(epoch)`，各 rank 用 (seed, epoch) 派生同一划分；
+        - 单卡：把我们自己持有的 generator 重新播种为 `seed + epoch`，
+          于是"第 N 个 epoch 的第 i 个 batch"在任何时候（含断点续训）都是同一批数据。
+        """
+        if self.ddp and hasattr(self.train_sampler, "set_epoch"):
+            self.train_sampler.set_epoch(epoch)
+        elif self._train_generator is not None:
+            self._train_generator.manual_seed(self.seed + int(epoch))
 
     def set_dataset(self, train_set, eval_set, batch_collator=None):
         self.train_set = train_set
@@ -95,20 +122,43 @@ class Trainer:
     def _init_dataloader(self):
         assert self.train_set and self.eval_set, f"train_set and eval_set can't be empty."
         train_set, eval_set, batch_size = self.train_set, self.eval_set, self.batch_size
-        sampler = DistributedSampler(train_set) if self.ddp else None
-        self.train_loader = DataLoader(train_set, 
-                                       batch_size=batch_size, 
-                                       shuffle=(sampler==None), 
-                                       num_workers=self.num_workers, 
-                                       drop_last=True, 
+        # 训练顺序完全由**我们自己的 sampler/generator** 决定，不依赖全局 RNG：
+        # 旧实现用 shuffle=True，RandomSampler 每次 __iter__ 都从全局 RNG 取种子，而 checkpoint
+        # 保存的 RNG 状态位于 epoch 中段 —— 续训恢复后拿到的是**另一个排列**，
+        # `skip_micro` 跳过的不再是同一批样本（会造成数据重复/漏训）。
+        #
+        # 注意 generator 还必须同时传给 DataLoader：`iter(loader)` 会抽一个 `_base_seed`
+        # 用于 worker 播种，而这一步**默认走全局 RNG**（与 sampler 类型无关，实测连
+        # SequentialSampler 也会消耗）。只有 generator= 指向我们自己的生成器，整条数据管线
+        # 才与全局 RNG 彻底解耦，否则 eval 的疏密仍会改变后续训练的随机性。
+        self._train_generator = torch.Generator()
+        self._train_generator.manual_seed(self.seed)
+        self._eval_generator = torch.Generator()
+        self._eval_generator.manual_seed(self.seed + 1_000_003)   # 与训练错开，互不干扰
+        if self.ddp:
+            self.train_sampler = DistributedSampler(train_set)
+        else:
+            # 固定 generator；每个 epoch 用 seed+epoch 重新播种（见 set_train_epoch）
+            self.train_sampler = RandomSampler(train_set, generator=self._train_generator)
+        self.train_loader = DataLoader(train_set,
+                                       batch_size=batch_size,
+                                       shuffle=False,
+                                       num_workers=self.num_workers,
+                                       drop_last=True,
                                        collate_fn=self.batch_collator,
-                                       sampler=sampler)
-        self.eval_loader = DataLoader(eval_set, 
-                                      batch_size=batch_size, 
-                                      shuffle=True, 
-                                      num_workers=self.num_workers, 
+                                       sampler=self.train_sampler,
+                                       generator=self._train_generator)
+        # 验证集必须 shuffle=False：
+        #   1) shuffle 会让每次 eval 的样本顺序不同，指标不可复现；
+        #   2) 旧实现在这里 shuffle，会**消耗训练用的全局 RNG**，于是 eval 的疏密会改变
+        #      后续训练的数据顺序，同一 run 的两次续训结果因此不一致。
+        self.eval_loader = DataLoader(eval_set,
+                                      batch_size=batch_size,
+                                      shuffle=False,
+                                      num_workers=self.num_workers,
                                       drop_last=False,
-                                      collate_fn=self.batch_collator)
+                                      collate_fn=self.batch_collator,
+                                      generator=self._eval_generator)
         self.steps_per_epoch = len(self.train_loader)
         # 梯度累积下，优化器更新次数 = 微批次数 / 累积步数（用于 LR 调度与总步数）
         self.updates_per_epoch = self.steps_per_epoch // self.gradient_accumulation_steps
@@ -152,7 +202,10 @@ class Trainer:
         
         os.environ['NCCL_DEBUG'] = 'WARN'
         world_size = int(os.environ["WORLD_SIZE"])
-        dist.init_process_group(backend="nccl", rank=rank, world_size=world_size, timeout=timedelta(seconds=120))
+        # 超时必须覆盖 rank0 独占的最慢操作（完整 eval + 数百 MB checkpoint 同步落盘，
+        # 二者都在 barrier 保护内）。旧值 120s 会在慢盘/大验证集时以 NCCL 超时打挂整轮训练。
+        dist.init_process_group(backend="nccl", rank=rank, world_size=world_size,
+                                timeout=timedelta(seconds=self.ddp_timeout_seconds))
         
         self.ddp = True
         self.rank = rank
@@ -394,7 +447,7 @@ class Trainer:
         skip_micro = skip_updates * self.gradient_accumulation_steps
 
         # 每个epoch开始时都重新打乱数据
-        self.train_loader.sampler.set_epoch(cur_epoch) if self.ddp else None
+        self.set_train_epoch(cur_epoch)
         print(f"{self.cur_time()} start epoch:{cur_epoch} from step:{self.step}") if self.verbose else None
 
         for i, batch in enumerate(self.train_loader):

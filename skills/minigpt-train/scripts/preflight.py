@@ -140,9 +140,19 @@ def check_assets():
     else:
         warn("tokenizer", "缺少 models/tokenizer_v3",
              "用 notebook 01 训练，或 python scripts/train_tokenizer.py --data dataset/pretrain_t2t_mini.jsonl --output models/tokenizer_v3 --vocab-size 32000")
-    alt = os.path.join(ROOT, "models", "tokenizer_qwen2")
-    if os.path.isdir(alt):
-        ok("tokenizer:qwen2", "models/tokenizer_qwen2 可用（151k 词表，6GB 卡吞吐仅 ~2k tok/s）")
+    # 项目只使用 tokenizer_v3；.bin 的 meta.vocab_size 必须与之相符（训练侧会强校验）
+    for meta_name in ("pretrain_v3_full", "code_domain"):
+        meta_path = os.path.join(ROOT, "dataset", "bins", f"{meta_name}.meta.json")
+        if not os.path.exists(meta_path):
+            continue
+        try:
+            import json as _json
+            with open(meta_path, encoding="utf-8") as f:
+                bin_vocab = _json.load(f).get("vocab_size")
+            if bin_vocab:
+                ok("bin:vocab", f"{meta_name}.bin vocab_size={bin_vocab}")
+        except Exception as exc:  # noqa: BLE001
+            warn("bin:vocab", f"{meta_name} meta 读取失败: {exc}")
 
     corpus = os.path.join(ROOT, "dataset", "pretrain_t2t_mini.jsonl")
     if os.path.exists(corpus):

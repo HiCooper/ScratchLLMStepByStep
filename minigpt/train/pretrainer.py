@@ -25,6 +25,7 @@ from minigpt.config import (ModelConfig, TrainConfig, DataConfig, PathConfig,
 from minigpt.data.pretrain_dataset import (TokenBinDataset, split_train_eval_blocks,
                                            validate_bin_tokenizer)
 from minigpt.model.transformer import GPTConfig, MiniGPT
+from minigpt.train.optim import build_optimizer, param_group_summary
 from minigpt.train.trainer import Trainer
 
 
@@ -86,8 +87,11 @@ def main():
               f"eval_rows={split_info['eval_rows']} actual_eval_ratio={split_info['actual_eval_ratio']} "
               f"bin_vocab={bin_info.get('bin_vocab')}")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=tc.learning_rate,
-                                  weight_decay=tc.weight_decay)
+    # weight decay 只作用于 >=2 维且非 bias 的参数（LayerNorm/RMSNorm 的 scale/shift 与
+    # 所有 bias 显式 0 衰减），避免把归一化尺度往 0 拉
+    optimizer = build_optimizer(model, lr=tc.learning_rate, weight_decay=tc.weight_decay)
+    if rank0:
+        print(f"[pretrainer] optimizer_groups={param_group_summary(optimizer)}")
     train_args = {
         "train_batch_size": tc.batch_size,
         "eval_strategy": "step",
@@ -108,6 +112,9 @@ def main():
         "mixed_precision_dtype": tc.mixed_precision_dtype
         if tc.mixed_precision_dtype in ("float16", "bfloat16") else "float16",
         "num_workers": tc.num_workers,
+        "seed": tc.seed,
+        "ddp_timeout_seconds": tc.ddp_timeout_seconds,
+        "deterministic_cudnn": tc.deterministic_cudnn,
         "torch_compile": tc.torch_compile,
         "compile_mode": tc.compile_mode,
     }

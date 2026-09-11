@@ -26,6 +26,7 @@ from minigpt.data.sft_dataset import (InstructionDataset, create_batch_collator,
                                       resolve_stop_token_ids, split_dataset)
 from minigpt.model.checkpoint import load_state_into_model, model_kwargs_from_checkpoint
 from minigpt.model.transformer import GPTConfig, MiniGPT
+from minigpt.train.optim import build_optimizer
 from minigpt.train.trainer import Trainer
 
 
@@ -95,8 +96,8 @@ def main():
 
     torch.manual_seed(tc.seed)
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    optimizer = torch.optim.AdamW(model.parameters(), lr=tc.learning_rate,
-                                  weight_decay=tc.weight_decay)
+    # 同预训练：weight decay 只作用于权重矩阵，不含 norm 尺度与 bias
+    optimizer = build_optimizer(model, lr=tc.learning_rate, weight_decay=tc.weight_decay)
 
     sft_max_lines = args.data_max_lines if args.data_max_lines else dc.max_lines
     ds = InstructionDataset(sft_jsonl, tokenizer, max_len=max_len,
@@ -126,6 +127,9 @@ def main():
         "use_mixed_precision": tc.mixed_precision_dtype != "none",
         "mixed_precision_dtype": tc.mixed_precision_dtype
         if tc.mixed_precision_dtype in ("float16", "bfloat16") else "float16",
+        "seed": tc.seed,
+        "ddp_timeout_seconds": tc.ddp_timeout_seconds,
+        "deterministic_cudnn": tc.deterministic_cudnn,
     }
     trainer = Trainer(model, optimizer, train_args, device=device, verbose=rank0)
     if rank0:

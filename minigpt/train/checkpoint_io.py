@@ -39,8 +39,48 @@ def build_payload(model, optimizer, *, epoch: int, step: int, best_eval_loss: fl
 
 
 def save_training_checkpoint(path, model, optimizer, **kw) -> None:
+    """**原子**写入 checkpoint。
+
+    生产级要求：直接 `torch.save(payload, path)` 在崩溃/磁盘写满/OOM-kill 时会留下
+    半截损坏文件，而"续训时读最近一个 checkpoint"恰好会去读这个坏文件，把一次可恢复的
+    故障放大成整轮训练报废。做法：写临时文件 -> fsync 落盘 -> `os.replace` 原子替换
+    （同一文件系统内 rename 是原子的），最后 fsync 目录保证目录项本身持久化。
+    """
+    path = str(path)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    torch.save(build_payload(model, optimizer, **kw), path)
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    payload = build_payload(model, optimizer, **kw)
+    try:
+        with open(tmp_path, "wb") as f:
+            torch.save(payload, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+        _fsync_dir(os.path.dirname(path) or ".")
+    except BaseException:
+        # 失败时清理临时文件，绝不动原有 checkpoint
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _fsync_dir(dir_path: str) -> None:
+    """fsync 目录，确保 rename 结果落到磁盘（部分文件系统不支持，忽略即可）。"""
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    try:
+        fd = os.open(dir_path or ".", os.O_DIRECTORY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def restore_rng_state(rng: dict) -> None:
