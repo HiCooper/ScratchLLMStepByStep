@@ -159,3 +159,46 @@ def test_removed_dead_fields_stay_removed():
         assert not hasattr(getattr(cfg, section), attr)
 
 
+
+
+# ---------------------------------------------------------------------------
+# 参数量估算：唯一实现（此前 estimate_resources.py 与 report_training.py 各有一份，
+# 后者忽略 SwiGLU/新的 8/3·d 宽度，会对 SwiGLU run 多报 50% 前馈参数）
+# ---------------------------------------------------------------------------
+def test_estimate_params_matches_real_model():
+    import torch
+    from minigpt.config import estimate_params, estimate_params_from_config
+    from minigpt.model.transformer import GPTConfig, MiniGPT
+
+    for kw in (dict(tie_word_embeddings=True),
+               dict(tie_word_embeddings=False),
+               dict(tie_word_embeddings=True, use_swiglu=True),
+               dict(tie_word_embeddings=False, use_swiglu=True),
+               dict(tie_word_embeddings=True, norm_type="rmsnorm", lm_head_bias=True)):
+        m = MiniGPT(GPTConfig(vocab_size=4096, emb_dim=128, n_layers=3, n_heads=4,
+                              context_length=32, **kw))
+        real = sum(p.numel() for p in m.parameters())
+        est = estimate_params_from_config(m.config)
+        assert abs(est - real) / real < 0.01, f"{kw}: 估算 {est} vs 实际 {real}"
+
+
+def test_estimate_params_swiglu_uses_eight_thirds_width():
+    """SwiGLU 的中间维是 8/3·d（不是 4·d）：参数量应与 GELU 版基本持平。"""
+    from minigpt.config import estimate_params
+    gelu = estimate_params(512, 10, 32000, use_swiglu=False, tie_word_embeddings=True)
+    swiglu = estimate_params(512, 10, 32000, use_swiglu=True, tie_word_embeddings=True)
+    assert abs(swiglu - gelu) / gelu < 0.02
+    old_wrong = estimate_params(512, 10, 32000, use_swiglu=True, ffn_hidden_dim=2048,
+                                tie_word_embeddings=True)
+    assert old_wrong > swiglu * 1.2, "旧的 4d 口径应显著更大，确保不会被误用回去"
+
+
+def test_estimate_params_accepts_dict_and_dataclass():
+    from minigpt.config import estimate_params_from_config
+    from minigpt.model.transformer import GPTConfig
+    a = estimate_params_from_config(ModelConfig())
+    b = estimate_params_from_config(vars(ModelConfig()))          # 扁平 dict（前缀已剥）
+    c = estimate_params_from_config(GPTConfig(vocab_size=32000, emb_dim=512,
+                                              n_layers=10, n_heads=8, context_length=512,
+                                              tie_word_embeddings=True))
+    assert a == b == c, f"{a} / {b} / {c} 应一致"

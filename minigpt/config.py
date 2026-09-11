@@ -169,6 +169,48 @@ def apply_mapping(cfg: RunConfig, mapping: dict) -> None:
             setattr(holder, attr, value)
 
 
+def round_to_multiple(value: float, multiple: int = 64) -> int:
+    """把数值就近对齐到 multiple 的倍数（与 model/transformer.py 的 SwiGLU 中间维规则一致）。"""
+    return max(multiple, int(round(value / multiple)) * multiple)
+
+
+def estimate_params(emb_dim: int, n_layers: int, vocab_size: int, *,
+                    use_swiglu: bool = False, ffn_hidden_dim: int = 0,
+                    tie_word_embeddings: bool = True, lm_head_bias: bool = False) -> int:
+    """按架构开关估算参数量（唯一实现，估算脚本与训练报告共用）。
+
+    口径与 `MiniGPT` 实现对齐：SwiGLU 的中间维默认是 8/3·d 对齐到 64，**不是** 4·d
+    （旧的两份重复实现里，报告那份按 12·d² 估算 SwiGLU，会比实际多报 50% 前馈参数）。
+    仅省略 bias 项（GELU 版每层还有 2·hidden+2·emb 的 bias，误差 <0.2%）。
+    """
+    emb_dim, n_layers, vocab_size = int(emb_dim), int(n_layers), int(vocab_size)
+    hidden = int(ffn_hidden_dim) or (
+        round_to_multiple(8 * emb_dim / 3) if use_swiglu else 4 * emb_dim)
+    attn = 4 * emb_dim * emb_dim                       # Q/K/V/O 四个 emb×emb
+    ffn = (3 if use_swiglu else 2) * emb_dim * hidden  # SwiGLU 3 矩阵 / GELU 2 矩阵
+    head = 0 if tie_word_embeddings else vocab_size * emb_dim
+    return (vocab_size * emb_dim + n_layers * (attn + ffn) + head
+            + (vocab_size if lm_head_bias else 0))
+
+
+def estimate_params_from_config(model_cfg) -> int:
+    """从 `ModelConfig` / `GPTConfig` / config.json 的 `model` 段估算参数量（含全部架构开关）。"""
+    if isinstance(model_cfg, dict):
+        get = model_cfg.get
+    else:
+        # ModelConfig(dataclass) 与 GPTConfig(PretrainedConfig) 都按属性读取
+        get = lambda k, d=None: getattr(model_cfg, k, d)          # noqa: E731
+    return estimate_params(
+        emb_dim=int(get("emb_dim", 512) or 512),
+        n_layers=int(get("n_layers", 10) or 10),
+        vocab_size=int(get("vocab_size", 0) or 0) or 32000,
+        use_swiglu=bool(get("use_swiglu", False)),
+        ffn_hidden_dim=int(get("ffn_hidden_dim", 0) or 0),
+        tie_word_embeddings=bool(get("tie_word_embeddings", True)),
+        lm_head_bias=bool(get("lm_head_bias", False)),
+    )
+
+
 def str2bool(value):
     """把 CLI 字符串解析成 bool。
 

@@ -1,7 +1,12 @@
-"""单卡版训练器（教学用）。
+"""单卡版训练器（**教学用**，对应 notebook 10「运算加速」/ 11「多卡并行」）。
 
-注意：这是「运算加速」一节的中间版本，未包含分布式(DDP)支持。
-多卡训练请使用 minigpt/train/trainer.py 中带 DDP 支持的 Trainer。
+⚠️ 本模块的 `Trainer`（正式名 `SingleCardTrainer`）与 `minigpt/train/trainer.py` 的
+`Trainer` **不是同一个类**：这里是教学用的最小实现，没有 AMP/梯度累积/原子 checkpoint/
+数据顺序可控/指标钩子等生产特性。**生产入口请一律用 `minigpt.train.trainer.Trainer`**
+（`python -m minigpt.train.pretrainer` / `sft_trainer` 已封装）。
+
+为避免与生产类同名造成误用，类已重命名为 `SingleCardTrainer`；同时保留
+`Trainer = SingleCardTrainer` 别名 —— notebook 通过 `%run` 本文件后仍按 `Trainer(...)` 调用。
 """
 
 import os
@@ -13,7 +18,7 @@ import torch.nn.functional as f
 from contextlib import nullcontext
 
 
-class Trainer:
+class SingleCardTrainer:
     def __init__(self, model, optimizer, train_args:dict, device='cpu', verbose=False):
         self.cur_time = lambda: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
         self.model = model
@@ -154,3 +159,9 @@ class Trainer:
         inputs = torch.tensor([tokenizer.encode(input_text)]).to(self.device)
         response_ids = self.model.generate(inputs, max_length=max_length, eos_token_id=tokenizer.eos_token_id, use_kv_cache=False)
         return tokenizer.decode(response_ids.squeeze(0))
+
+
+# 向后兼容别名：notebook 10/11 通过 `%run minigpt/train/pretrainer_single.py` 引入本文件后
+# 直接按 `Trainer(...)` 调用。新代码请显式使用 `SingleCardTrainer`，生产用
+# `minigpt.train.trainer.Trainer`。
+Trainer = SingleCardTrainer

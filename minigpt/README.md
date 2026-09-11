@@ -1,469 +1,188 @@
-# minigpt 包使用说明（生产级）
+# minigpt 包使用说明
 
-本目录是 MiniGPT 的核心工程实现：模型、数据管线、训练器、指标记录、推理与评估。
-所有入口共享 `minigpt/config.py` 的集中配置，支持扁平 CLI 覆盖，产物带配置快照、可续训、可复现。
+模型、数据管线、训练器、指标记录、推理与评估的实现都在这里。所有入口共享 `minigpt/config.py` 的集中配置，
+支持扁平 CLI 覆盖；产物带配置快照，可续训、可复现。项目级信息（notebook 章节、数据集下载、模型规模估算、实测结果）
+见 [根 README](../README.md)。
 
 ```
 minigpt/
-├── config.py               # 配置（Model/Data/Train/Path + CLI 覆盖）
+├── config.py               # RunConfig（model/data/train/paths）+ CLI 覆盖 + 布尔解析
 ├── model/
-│   ├── attention.py        # 多头注意力 / FlashAttention 版本（可选捕获注意力权重）
-│   └── transformer.py      # GPTConfig / TransformerBlock / MiniGPT（含采样解码）
+│   ├── attention.py        # 多头注意力 / FlashAttention 版（可选捕获注意力权重）
+│   ├── transformer.py      # LayerNorm/RMSNorm / FFN / GPTConfig / MiniGPT（含 _init_weights 与采样解码）
+│   ├── checkpoint.py       # 重建模型（config 优先→形状反推）+ 宽容权重加载器
+│   └── generation.py       # 停止串 / 思考模式（两阶段 CoT）生成工具
 ├── data/
-│   ├── pretrain_dataset.py # jsonl→.bin(+meta) 管线、TokenBinDataset、旧版 Dataset
-│   └── sft_dataset.py      # 指令数据 InstructionDataset / collate
+│   ├── pretrain_dataset.py # jsonl→.bin(+meta) / TokenBinDataset(memmap) / 分块验证集切分 / 词表校验
+│   └── sft_dataset.py      # InstructionDataset / collate（逐轮 assistant 掩码 + 停止符解析）
 └── train/
-    ├── trainer.py          # 通用 Trainer（AMP/梯度累积/lr 调度/eval/save/resume/DDP）
-    ├── metrics.py          # TensorBoard 指标（标量/直方图/图像/模型图/嵌入投影/文本）
-    ├── pretrainer.py       # 预训练入口（python -m minigpt.train.pretrainer）
-    └── sft_trainer.py      # SFT 入口（python -m minigpt.train.sft_trainer）
+    ├── trainer.py          # 训练循环：AMP / 梯度累积 / eval / save / resume / DDP / compile 编排
+    ├── schedule.py         # LR 调度（warmup+cosine）与 loss 记账（纯函数）
+    ├── ddp_utils.py        # DDP 包装/解包/跨 rank 平均
+    ├── checkpoint_io.py    # checkpoint 原子读写 + RNG/缩放器恢复
+    ├── optim.py            # 优化器构造（weight decay 分组）
+    ├── metrics.py          # TensorBoard 指标
+    ├── pretrainer.py       # 预训练入口（支持 DDP）
+    ├── sft_trainer.py      # SFT 入口
+    └── pretrainer_single.py # 单卡教学版训练器（notebook 09/10 使用）
 ```
-
----
 
 ## 1. 快速开始
 
 ```bash
-# 数据管线：jsonl → .bin + .meta.json
-python scripts/build_pretrain_bin.py build \
-    --corpus-jsonl dataset/pretrain_t2t_mini.jsonl \
-    --tokenizer-dir models/tokenizer_v3 \
-    --out-bin dataset/bins/pretrain_v3_600k.bin --max-lines 600000
+python3 -m minigpt.train.pretrainer --paths_output_dir models/checkpoints/pretrain_v3 \
+    --train_batch_size 8 --train_torch_compile True --train_max_steps 200000
+NPROC=2 bash scripts/pretrain_start.sh --paths_output_dir models/checkpoints/pretrain_ddp   # 多卡
 
-# 预训练（单卡；多卡用 NPROC=2 bash scripts/pretrain_start.sh ...）
-python3 -m minigpt.train.pretrainer \
-    --paths_output_dir models/checkpoints/pretrain_v1_512
-
-# SFT（在预训练 checkpoint 上微调）
 python3 -m minigpt.train.sft_trainer \
-    --pretrain models/checkpoints/pretrain_v1_512/final.pt \
-    --paths_output_dir models/checkpoints/sft_v1_512
+    --pretrain models/checkpoints/pretrain_v3/final.pt \
+    --sft-jsonl dataset/sft/sft_data_zh.jsonl --data_max_lines 60000 \
+    --paths_output_dir models/checkpoints/sft_v3_chat
 
-# 推理 / 评估
-python scripts/generate.py --checkpoint models/checkpoints/sft_v1_512/final.pt \
-    --tokenizer-dir models/tokenizer_v3 --chat --prompt "什么是AI？" \
-    --do-sample --temperature 0.8 --top-k 50 --top-p 0.92 --repeat-penalty 1.2
-python scripts/evaluate_pretrain.py --checkpoint models/checkpoints/pretrain_v1_512/final.pt \
+python scripts/generate.py --checkpoint models/checkpoints/sft_v3_chat/final.pt \
+    --tokenizer-dir models/tokenizer_v3 --chat --prompt "什么是AI？"
+python scripts/evaluate_pretrain.py --checkpoint models/checkpoints/pretrain_v3/final.pt \
     --tokenizer-dir models/tokenizer_v3 --bin dataset/bins/pretrain_v3_full.bin --split val
 ```
 
-## 2. 配置（`minigpt/config.py`）
+## 2. 配置
 
 | dataclass | 关键字段 |
 |---|---|
-| `ModelConfig` | `emb_dim/n_layers/n_heads/context_length/vocab_size(0=由 tokenizer 推导)/drop_rate/qkv_bias/flash_attn/tie_word_embeddings/use_swiglu/use_checkpoint` |
-| `DataConfig` | `tokenizer_dir/corpus_jsonl/content_key/max_lines/tokenized_bin/bin_meta/eval_ratio` |
-| `TrainConfig` | `epochs/learning_rate/batch_size/weight_decay/grad_accumulation_steps/max_steps/warmup_steps/eval_steps/save_steps/grad_clip/mixed_precision_dtype/seed/num_workers` + **指标项（见 §4）** |
-| `PathConfig` | `output_dir/last_checkpoint_path`（续训） |
+| `ModelConfig` | `emb_dim / n_layers / n_heads / context_length / vocab_size(0=由 tokenizer 推导) / drop_rate / qkv_bias / qkv_merged / flash_attn / tie_word_embeddings / use_swiglu / use_checkpoint / norm_type / ffn_hidden_dim / lm_head_bias / rope_theta` |
+| `DataConfig` | `tokenizer_dir / corpus_jsonl / content_key / max_lines / tokenized_bin / bin_meta / eval_ratio / eval_blocks` |
+| `TrainConfig` | `epochs / learning_rate / batch_size / weight_decay / grad_accumulation_steps / max_steps / reset_step / extra_steps / warmup_steps / eval_steps / save_steps / save_best / grad_clip / mixed_precision_dtype / seed / num_workers / torch_compile / ddp_timeout_seconds / deterministic_cudnn` + 指标项（§4） |
+| `PathConfig` | `output_dir / last_checkpoint_path / sft_dataset` |
 
-任意入口均可扁平覆盖：`--model_emb_dim 512 --train_batch_size 8 --paths_output_dir ...`；
-运行结束会把完整配置写入 `output_dir/config.json`。
+扁平覆盖：`--model_emb_dim 512 --train_batch_size 8 --paths_output_dir ...`；布尔必须带值（`True/False/1/0/yes/no`）。
+运行结束把完整配置写入 `output_dir/config.json`，可用 `--config-file <该文件>` 整份读回（CLI 优先级更高）。
 
 ## 3. 训练产物
 
 ```
 output_dir/
-├── config.json                # 本次运行完整配置
-├── checkpoint-{step}.pth      # 周期 checkpoint：model/optimizer/scaler/RNG/config
-├── best.pt                    # eval_loss 历史最优时的权重（--train_save_best False 可关）
-├── final.pt                   # 主进程最终保存（同样含 config，可直接用于推理）
-├── tensorboard/               # 指标事件（见下）
-├── metrics.json               # 最终指标（step/epoch/train_loss/eval_loss/perplexity/best_eval_loss/best_step）
-└── sample.txt                 # 训练后采样输出
+├── config.json             # 本次运行完整配置
+├── checkpoint-{step}.pth   # 周期存档：model/optimizer/scaler/RNG/config
+├── best.pt                 # eval_loss 历史最优（--train_save_best False 可关；下游/评测优先用它）
+├── final.pt                # 最终存档（同样含 config，可直接推理）
+├── tensorboard/            # 指标事件（§4）
+├── metrics.json            # 最终指标 + data_split（评估口径）+ bin_meta
+└── sample.txt              # 训练后采样
 ```
-续训：`--paths_last_checkpoint_path output_dir/checkpoint-2000.pth`（自动恢复优化器、混合精度缩放器与随机数状态）。
 
-> **best.pt vs final.pt（生产经验）**：47.9M 的小模型在 SFT/CoT 后期几乎必然过拟合——实测 CoT easy
-> `best_eval_loss=1.611`（约 step 5k）而 `final.pt` 已升到 `1.740`。因此训练器在每次 eval 创新低时额外写
-> `best.pt`；做下游训练、思考模式评测、对外发布时**优先用 `best.pt`**（同结构、同 config，可直接替换 `final.pt`）。
-> 每个 checkpoint 都含优化器 + RNG 状态（单文件 ~585MB），用 `scripts/checkpoint_janitor.sh` 控盘。
+续训：`--paths_last_checkpoint_path output_dir/checkpoint-2000.pth` —— 自动恢复优化器、混合精度缩放器与随机数状态。
+数据顺序由独立 generator 按 `seed+epoch` 播种（与全局 RNG 解耦），因此续训跳过的正是已训过的同一批样本。
 
----
+> 小模型在 SFT/CoT 后期几乎必然过拟合（实测 CoT easy：`best_eval_loss=1.611` vs `final=1.740`），
+> 所以下游训练/评测/发布**优先用 `best.pt`**。每个存档含优化器+RNG（单文件 ~585MB），用
+> `scripts/checkpoint_janitor.sh` 控盘；写入是原子的（tmp→fsync→rename），中断不会破坏上一个可用存档。
 
 ## 4. 训练过程指标（TensorBoard）
 
-### 4.1 查看方式
 ```bash
-tensorboard --logdir models/checkpoints/pretrain_v1_512/tensorboard --port 6006
-# 浏览器打开 http://localhost:6006
+tensorboard --logdir models/checkpoints/pretrain_v3/tensorboard --port 6006   # http://localhost:6006
 ```
-> 需要 `tensorboard` 依赖（已在 `requirements.txt`）；SFT 运行日志在各自 `output_dir/tensorboard/`。
 
-### 4.2 记录的指标一览
-
-| 面板 | 标签（tag） | 记录时机 / 默认间隔 | 说明 |
-|---|---|---|---|
-| **标量 Scalars** | `train/loss`、`train/lr`、`train/grad_norm`、`train/tokens_per_sec` | 每个参数更新步 | 训练损失、当前学习率、梯度范数、吞吐 |
-| | `eval/loss`、`eval/perplexity`、`train/loss_eval_window`、`train/lr_eval`、`eval/final_loss` | 每 `eval_steps` 步 / 训练结束 | 验证损失与困惑度（ppl） |
-| **直方图 Histograms** | `weights/<参数名>`、`grads/<参数名>`、`buffers/<缓冲区名>` | 每 `log_hist_every` 步（默认 500） | 权重/梯度分布，用于观察消失/爆炸、量化前后分布 |
-| **图像 Images** | `attention/layer0_head0` | 每 `log_attention_every` 步（默认 1000） | 第 0 层第 0 头在真实批次上的注意力热力图（`attention.py` 的 `capture_attention` 按需开启，默认关闭） |
-| | `curves/loss` | 同注意力间隔 / 训练结束 | train/eval 损失曲线图 |
-| **模型图 Graphs** | `add_graph`（GRAPH 面板） | 首个训练步一次（`--train_log_graph True`） | 由 `torch.jit.trace` 生成的 MiniGPT 计算图 |
-| **嵌入投影 Projector** | `token_embedding` + `token_embedding/metadata` | 每 `log_embedding_every` 步（默认 2000）/ 训练结束 | 输入词嵌入的 3D PCA/UMAP 投影，metadata 为 token 文本 |
-| **文本 Text** | `samples/generation/text_summary` | 每 `log_samples_every` 步（`0`=仅结束时）与训练结束 | 用当前权重对 `sample_prompts` 采样生成的结果 |
-
-### 4.3 指标相关配置（`TrainConfig` / CLI 前缀 `--train_`）
-
-| 参数 | 默认 | 作用 |
+| 面板 | 标签 | 时机 / 默认间隔 |
 |---|---|---|
-| `log_hist_every` | 500 | 权重/梯度直方图间隔；`0` 关闭 |
-| `log_hist_max_numel` | 2,000,000 | 超大张量（如大词表 embedding）跳过直方图，避免事件文件膨胀 |
-| `log_embedding_every` | 2000 | 投影面板间隔；`0` 关闭 |
-| `projector_max_tokens` | 2000 | 写入投影面板的 token 向量数（均匀采样全词表，带 token 文本） |
-| `log_attention_every` | 1000 | 注意力热力图间隔；`0` 关闭 |
-| `log_graph` | False | 是否记录模型计算图 |
-| `log_samples_every` | 0 | 周期性记录生成文本；`0` 表示只在训练结束时记录 |
-| `sample_max_new_tokens` | 60 | 样本文本生成长度 |
-| `sample_prompts` | `什么是AI？\|如何保持身体健康？\|从前有座山，山上有座庙` | 用 `\|` 分隔的采样提示词 |
+| 标量 | `train/loss`、`train/lr`、`train/grad_norm`、`train/tokens_per_sec` | 每个更新步 |
+| | `eval/loss`、`eval/perplexity`、`train/loss_eval_window`、`eval/final_loss` | 每 `eval_steps` / 训练结束 |
+| 直方图 | `weights/*`、`grads/*`、`buffers/*` | `log_hist_every`（默认 500，`0` 关） |
+| 图像 | `attention/layer0_head0`、`curves/loss` | `log_attention_every`（默认 1000，`0` 关） |
+| 模型图 | GRAPH 面板 | 首步一次（`--train_log_graph True`） |
+| 嵌入投影 | `token_embedding` + `/metadata` | `log_embedding_every`（默认 2000，`0` 关） |
+| 文本 | `samples/generation/text_summary` | `log_samples_every`（`0`=仅结束时） |
 
-示例（开启全部面板、加密采样间隔，便于快速自检）：
-```bash
-python3 -m minigpt.train.pretrainer \
-    --model_emb_dim 64 --model_n_layers 2 --model_n_heads 4 --model_context_length 64 \
-    --train_max_steps 6 --train_eval_steps 2 --train_log_hist_every 2 \
-    --train_log_embedding_every 2 --train_log_attention_every 2 \
-    --train_log_graph True --train_log_samples_every 2 \
-    --paths_output_dir /tmp/metrics_smoke
-```
+相关配置（CLI 前缀 `--train_`）：`log_hist_every / log_hist_max_numel(超大张量跳过) / log_embedding_every /
+projector_max_tokens / log_attention_every / log_graph / log_samples_every / sample_max_new_tokens / sample_prompts`。
 
-### 4.4 实现与注意事项
-- 实现位置：`minigpt/train/metrics.py` 的 `MetricsLogger`，由 `pretrainer.py` / `sft_trainer.py` 在主进程创建并挂到 `Trainer.metrics`；
-  `Trainer` 在“参数更新步 / 评估点 / 训练结束”三处回调（`on_train_step`、`on_eval`、`on_final`）。
-- **嵌入投影**：torch 2.13 + tensorboard 2.21 组合下 `SummaryWriter.add_embedding` 会静默不写事件，
-  本实现改为按 projector 插件规范直接写 `TensorProto`（`<tag>` 与 `<tag>/metadata`），因此 Projector 面板可正常自动发现；
-  首次打开 Projector 面板时 TensorBoard 需要几十秒做 PCA/UMAP 降维。
-- **模型图**：`add_graph` 基于 `torch.jit.trace`，会对动态位置编码等产生 `TracerWarning`（不影响训练与图形展示），
-  且 trace 以首个批次的序列长度为常量；如需精确图可改用 `torch.fx` 导出。
-- **GPU 开销**：直方图/图像/投影按间隔触发，默认间隔下对吞吐影响 < 2%；若追求极致吞吐可把 `log_hist_every` 调大或设为 0。
-- **事件文件体积**：直方图与投影是主要体积来源，长训练建议保留默认间隔或降低 `projector_max_tokens`。
-
-### 4.5 指标自检（无 UI 快速验证）
-```bash
-python - <<'PY'
-import glob, struct
-from tensorboard.compat.proto import event_pb2
-from tensorboard.backend.event_processing import event_accumulator as EA
-
-def records(data):
-    i = 0
-    while i + 12 <= len(data):
-        n = struct.unpack('<Q', data[i:i+8])[0]; i += 12
-        yield data[i:i+n]; i += n + 4
-
-path = sorted(glob.glob('models/checkpoints/pretrain_v1_512/tensorboard/events*'))[-1]
-kinds, tags, graph = {}, set(), False
-for raw in records(open(path, 'rb').read()):
-    ev = event_pb2.Event(); ev.ParseFromString(raw)
-    k = ev.WhichOneof('what'); kinds[k] = kinds.get(k, 0) + 1
-    graph = graph or k == 'graph_def'
-    if k == 'summary':
-        tags |= {v.tag for v in ev.summary.value}
-print('events:', kinds, '| graph:', graph)
-print('panels:', [t for t in sorted(tags) if '/' in t][:12], '...')
-ea = EA.EventAccumulator(path, size_guidance={'scalars':0,'histograms':0,'images':0,'tensors':0})
-ea.Reload(); print({k: len(v) if isinstance(v, list) else v for k, v in ea.Tags().items()})
-PY
-```
-实测输出（小规模自检）：`summary` 事件 130+、`graph_def` 存在；标量 8、直方图 31、图像 2、
-`token_embedding(+metadata)` 投影张量与 `samples/generation/text_summary` 文本均存在。
-
----
+- 实现：`MetricsLogger` 由两个入口在主进程创建并挂到 `Trainer.metrics`，回调 `on_train_step / on_eval / on_final`。
+- 直方图钩子在 `zero_grad` **之前**触发（否则 `grads/*` 恒为空）；嵌入投影按 projector 插件规范直接写 `TensorProto`
+  （绕开 torch 2.13 + tensorboard 2.21 下 `add_embedding` 静默失效）。
+- 默认间隔下对吞吐影响 < 2%；追极致吞吐把 `log_hist_every` 调大或设 0。
 
 ## 5. 推理与评估
 
-### 5.1 交互式聊天 / 续写（本仓库已训练产物，可直接复制运行）
-
 ```bash
-# ① SFT 后：交互式问答聊天（推荐，会自动套用 chat 模板组装 <|im_start|>user…<|im_start|>assistant）
-python3 scripts/generate.py \
-  --checkpoint models/checkpoints/sft_v1_512/final.pt \
-  --tokenizer-dir models/tokenizer_v3 \
-  --max-new-tokens 90 --do-sample --temperature 0.8 --top-k 50 --top-p 0.92 --repeat-penalty 1.2 --seed 5 \
-  --chat --interactive
-
-# ② 未 SFT：预训练基座的交互式续写（不加 --chat，直接续写你输入的文本）
-python3 scripts/generate.py \
-  --checkpoint models/checkpoints/pretrain_v1_512/final.pt \
-  --tokenizer-dir models/tokenizer_v3 \
-  --max-new-tokens 90 --do-sample --temperature 0.8 --top-k 50 --top-p 0.92 --repeat-penalty 1.2 --seed 5 \
-  --interactive
-
-# ③ 对照：预训练基座也套 chat 模板（未经指令微调，回答更发散、有时跑题）
-python3 scripts/generate.py \
-  --checkpoint models/checkpoints/pretrain_v1_512/final.pt \
-  --tokenizer-dir models/tokenizer_v3 \
-  --max-new-tokens 90 --do-sample --temperature 0.8 --top-k 50 --top-p 0.92 --repeat-penalty 1.2 --seed 5 \
-  --chat --interactive
-```
-
-会话要点：
-- 运行后出现 `用户> ` 提示符，输入问题回车即可；空行会跳过；`Ctrl-D`（或 `Ctrl-C`）退出并打印 `[generate] bye`。
-- **特殊 token 默认隐藏**：`<|im_end|>` 是 tokenizer_v3 的 eos（id=2），模型在回答结束时输出它并**提前停止生成**（回合正常收尾）。
-  想看原始序列加 `--keep-special-tokens`。
-- 想换风格：调 `--temperature`（越高越发散）、`--top-k/--top-p`（截断采样范围）、`--repeat-penalty`（抑制复读）、`--seed`（复现同一回答）。
-- 非交互用法等价：`--prompt "问题"`（可多次）或 `--prompt-file prompts.txt`，加 `--output-file out.txt` 落盘。
-- SFT 产物是 47.9M 小模型（3 epochs 预训练 + 4,900 步 SFT），短问答可用；长对话一致性有限，
-  续训/扩 SFT 数据即可提升（见 §3 续训与 §1 快速开始）。
-
-### 5.2 采样参数与评估
-
-```bash
-# 采样解码参数：do_sample / temperature / top_k / top_p / repetition_penalty
-python scripts/generate.py --checkpoint <ckpt> --tokenizer-dir <tok> \
+# 采样参数：do_sample / temperature / top_k / top_p / repetition_penalty / seed
+python scripts/generate.py --checkpoint <ckpt> --tokenizer-dir models/tokenizer_v3 \
     --prompt "..." [--prompt-file f.txt | --interactive] [--chat] \
     --max-new-tokens 128 --do-sample --temperature 0.8 --top-k 50 --top-p 0.92 \
     --repeat-penalty 1.2 --seed 0 [--output-file out.txt]
+```
+- 加 `--chat` 会套 chat 模板（`<|im_start|>user…<|im_start|>assistant`）；不加则是文本续写。
+- 特殊 token 默认隐藏：`<|im_end|>` 是 tokenizer_v3 的 eos(id=2)，模型输出它即**提前停止**（回合正常收尾）；`--keep-special-tokens` 看原始序列。
 
+```bash
 # 验证集 loss / perplexity
-#   --split val（默认）= 均匀分块 + 双端对齐文档边界的留出集，与训练时 split_train_eval_blocks
-#   同一口径，切分范围记录在输出的 data_split 字段里，可跨 checkpoint 比较。
-#   ⚠️ --split all --max-rows N 取的是 .bin 最前面的窗口：对参与过训练的 bin 而言那是训练集
-#      loss，且本语料按领域排序，头/尾 ppl 实测可差 3 倍以上，不同 N 之间也不可比。
 python scripts/evaluate_pretrain.py --checkpoint <ckpt> --bin <bin> \
-    --tokenizer-dir <tok> --batch-size 8 --split val --output metrics_eval.json
+    --tokenizer-dir models/tokenizer_v3 --batch-size 8 --split val --output metrics_eval.json
 ```
+> **口径要点**：`--split val`（默认）= 均匀分块 + 双端对齐文档边界的留出集，与训练时 `split_train_eval_blocks`
+> 同一口径，切分范围记录在输出 `data_split` 里，可跨 checkpoint 比较。
+> ⚠️ `--split all --max-rows N` 取的是 `.bin` **最前面**的窗口：对参与过训练的 bin 而言那是训练集 loss，
+> 且本语料按领域排序，头/尾 ppl 实测可差 3 倍以上，不同 N 之间也不可比。
 
-### 5.3 吞吐优化（本机实测）
+## 6. 思考模式（CoT）
 
-| 配置 | 单步耗时（512/10/8，bs8×ctx512） | 吞吐 |
-|---|---|---|
-| 默认（fp16 + GradScaler） | 0.229 s | 17.9k tok/s |
-| cudnn.benchmark=True / deterministic=False | 0.228 s | 17.9k tok/s（无收益） |
-| **`--train_torch_compile True`** | **0.138 s** | **29.7k tok/s（+66%）** |
+"思考模式"不是模型里的开关，而是**数据 + 损失掩码 + 推理协议**三件套。协议（`model/generation.py`）：
 
-用法与注意：
-```bash
-python3 -m minigpt.train.pretrainer --train_torch_compile True ...   # 预训练固定形状，收益最大
-```
-- `torch.compile` 在**固定序列长度**（预训练窗口恒为 ctx）下收益最大；SFT 的变长 padding 会触发反复重编译，
-  故 `sft_trainer` 默认不启用（如需可显式 `--train_torch_compile True` 并配合固定 `max_len`）。
-- 启用后 `Trainer` 内部会同时兼容 `DistributedDataParallel` 与 `OptimizedModule`（checkpoint 存取统一走 `_unwrap()`）。
-- 计算图中存在 `position_ids.max().item()` 等导致的 graph break（dynamo 会警告），但实测仍显著提速。
-
-### 5.4 续训（resume）注意事项
-- checkpoint 内含 `model_state / optimizer_state / scaler_state / rng_state / config`，续训用
-  `--paths_last_checkpoint_path <ckpt>` 即可完整恢复优化器与随机状态。
-- 已修复：`torch.load(map_location=device)` 会把 RNG 的 `ByteTensor` 一并搬到 GPU，导致
-  `set_rng_state` 报 `RNG state must be a torch.ByteTensor`；现在加载时统一 `.cpu()` 修正。
-
-## 6. 测试
-
-```bash
-pytest tests/ -q      # 覆盖模型/注意力/数据管线/采样解码/配置/trainer
-```
-
-## 7. 环境提示
-- RTX 20 系（Turing）不支持 FlashAttention-2：统一 `--model_flash_attn False`（默认）。
-- 大词表 tokenizer（如 Qwen2.5 151k）在 6GB 卡上吞吐仅 ~2k tok/s（见根 README 实测表），
-  本仓库默认使用 32k 中文 BPE（`models/tokenizer_v3`）；换用其它 tokenizer 只需改
-  `--data_tokenizer_dir`，模型词表会自动跟随。
-
----
-
-## 8. 思考模式（Chain-of-Thought / CoT）
-
-### 8.1 它是什么
-"思考模式"不是模型里的一个开关，而是**训练数据 + 训练目标 + 推理协议**三件套：
-1. **数据**：SFT 样本的答案里显式包含推理过程，模型才"有得学"；
-2. **训练**：只对 assistant 段计算损失（`InstructionDataset` + `-100` 掩码已支持）；
-3. **推理**：约定思考段与答案的分隔标记，生成时按标记切分/截断/隐藏。
-
-本仓库采用的协议（`minigpt/model/generation.py`）：
 ```
 <|im_start|>assistant
 让我逐步分析：
 1. …
-2. …
 最终答案：<答案><|im_end|>
 ```
 
-### 8.2 构造 CoT 数据（可验证任务）
 ```bash
-# easy：1~2 位数单步/两步（小模型容量匹配，能真正学会）
-python scripts/build_cot_sft.py --profile easy \
-    --out-train dataset/sft/sft_cot_easy_zh.jsonl \
-    --out-eval  dataset/sft/cot_eval_easy_zh.jsonl --n-train 20000 --n-eval 200
+# 1) 造数据（自带 --mix-general 混通用指令；保证 train/eval 题面零重合）
+python scripts/build_cot_sft.py --profile easy --easy-max 20 \
+    --out-train dataset/sft/sft_cot_easy_disjoint60k.jsonl \
+    --out-eval  dataset/sft/cot_eval_easy_disjoint.jsonl --n-train 60000 --n-eval 200
 
-# hard：多位数四则运算 + 应用题（对模型容量要求高）
-python scripts/build_cot_sft.py --profile hard \
-    --out-train dataset/sft/sft_cot_zh.jsonl \
-    --out-eval  dataset/sft/cot_eval_zh.jsonl --n-train 30000 --n-eval 200
+# 2) 训练（只对 assistant 段算 loss，逐轮掩码）
+python3 -m minigpt.train.sft_trainer --pretrain models/checkpoints/pretrain_v3/final.pt \
+    --sft-jsonl dataset/sft/sft_cot_easy_disjoint60k.jsonl --data_max_lines 60000 \
+    --train_learning_rate 2e-5 --train_epochs 2 --paths_output_dir models/checkpoints/sft_cot_easy
+
+# 3) 推理（--thinking；single=一次生成"思考+答案"最稳，two-phase=先思考再作答）
+python3 scripts/generate.py --checkpoint models/checkpoints/sft_cot_easy/final.pt \
+    --tokenizer-dir models/tokenizer_v3 --chat --thinking --thinking-strategy single \
+    --prompt "请计算 27 ÷ 3 等于多少？" [--hide-thinking] [--thinking-max-tokens 120]
+
+# 4) 评测（留出集 + 贪心；算术评测必须 --repetition-penalty 1.0）
+python3 scripts/eval_thinking.py --checkpoint models/checkpoints/sft_cot_easy/final.pt \
+    --eval-jsonl dataset/sft/cot_eval_easy_disjoint.jsonl --n 60 \
+    --strategies plain,single,two-phase --repetition-penalty 1.0 --output result.json
 ```
-数据自带 `mix-general`（默认 25%）混入通用指令，避免灾难性遗忘；评测集用不同随机种子与生成器偏移，**与训练题不重合**。
 
-### 8.3 训练 CoT-SFT
+Python 侧调用 `minigpt.model.generation.generate_with_thinking(...)`，返回 `thinking / answer / display / full / marker_hit`。
+
+**实测结论**（RTX2060，60 题，贪心）：思考模式确实有效（easy 0% → 90% → 100%），但 **hard 是容量墙**——
+47.9M 参数在多位数乘加上算不对，需放大模型或走「工具调用范式」。
+⚠️ **easy 的 100% 是记忆而非泛化**：easy 题目空间只有 1063 个唯一题目，旧留出集 156 条 100% 落在训练集内
+（hard 33.5%）。现在 `--easy-max` 可扩大题目空间，并用 `*_disjoint.jsonl` 做零重合验收——**该验收结果尚未产出**。
+
+## 7. 训练看板与续训
+
 ```bash
-# easy（推荐先跑这个：~15 分钟，可验证"思考模式"确实有效）
-python3 -m minigpt.train.sft_trainer \
-    --pretrain models/checkpoints/pretrain_v1_512/final.pt \
-    --data_tokenizer_dir models/tokenizer_v3 \
-    --sft-jsonl dataset/sft/sft_cot_easy_zh.jsonl --data_max_lines 20000 \
-    --train_batch_size 8 --train_learning_rate 2e-5 --train_epochs 2 \
-    --paths_output_dir models/checkpoints/sft_cot_easy_v1
-
-# hard（在已有对话模型上继续加 CoT）
-python3 -m minigpt.train.sft_trainer \
-    --pretrain models/checkpoints/sft_v1_512/final.pt \
-    --sft-jsonl dataset/sft/sft_cot_zh.jsonl --data_max_lines 30000 \
-    --train_batch_size 8 --train_learning_rate 1e-5 --train_epochs 1 \
-    --paths_output_dir models/checkpoints/sft_cot_v1
+python scripts/train_dashboard.py --serve --port 8099 --refresh 5   # 浏览器（含 grad_norm 红虚线）
+python scripts/train_dashboard.py --once                            # 终端一次性
+python scripts/train_dashboard.py --plot out.png                    # 导出损失走势图
 ```
+与 TensorBoard 的分工：看板面向"长训实时盯盘"（进度/ETA/吞吐/是否卡住），TensorBoard 面向细粒度诊断（直方图/注意力/投影）。
 
-### 8.4 推理（思考模式开关）
+续训要点：
+- `--paths_last_checkpoint_path <ckpt>` 恢复 model/optimizer/scaler/RNG/step/best 记录；
+  增量领域续训必须 `--train_reset_step True`（否则"从 211k 步基座再训 N 步"会被当成绝对步数而直接判定训完）。
+- 长训用 `scripts/train_pretrain_resilient.sh`（崩溃自动续跑）+ `scripts/checkpoint_janitor.sh`（空间守护）。
+
+## 8. 测试与环境
+
 ```bash
-python3 scripts/generate.py \
-  --checkpoint models/checkpoints/sft_cot_easy_v1/final.pt \
-  --tokenizer-dir models/tokenizer_v3 \
-  --chat --prompt "请计算 27 ÷ 3 等于多少？" --thinking
+pytest -q                 # 189 项，CPU 即可运行，不需要数据与 GPU
 ```
-实测输出：
-```
-模型: 【思考】
-      1. 想 3 乘几等于 27
-      2. 3 × 9 = 27，所以商是 9
-      【回答】
-      9
-```
-参数：
-| 参数 | 默认 | 作用 |
-|---|---|---|
-| `--thinking` | 关 | 开启思考模式 |
-| `--thinking-strategy` | `single` | `single`＝一次生成"思考+答案"（最稳，推荐）；`two-phase`＝先思考到 `最终答案：` 再作答（思考预算可控、适合长推理） |
-| `--thinking-max-tokens` | 120 | 思考预算（two-phase 的思考段上限；single 时与 `--max-new-tokens` 相加为总预算） |
-| `--hide-thinking` | 关 | 只显示最终答案，思考仍在内部生成（用于产品化输出） |
-
-在 Python 里调用：`minigpt.model.generation.generate_with_thinking(...)`，返回 `thinking / answer / display / full / marker_hit`。
-
-### 8.5 评测（留出集，可复现）
-```bash
-python3 scripts/eval_thinking.py \
-  --checkpoint models/checkpoints/sft_cot_easy_v1/final.pt \
-  --eval-jsonl dataset/sft/cot_eval_easy_zh.jsonl --n 60 \
-  --strategies plain,single,two-phase --repetition-penalty 1.0 \
-  --output result.json
-```
-
-### 8.6 实测结果（RTX 2060 6GB，60 题留出集，贪心解码）
-
-**v1 基座（67.7M tokens 预训练）**
-
-| 任务档次 | 模型 | plain（直接生成后取答案） | single（单通道 CoT） | two-phase |
-|---|---|---|---|---|
-| **easy**（1~2 位数单/两步） | 预训练基座 | **0.0%** | 1.7% | 1.7% |
-| | CoT-SFT（20k 条 / 2 epochs） | **90.0%** | **90.0%** | **90.0%** |
-| **hard**（多位数四则+应用题） | CoT-SFT（30k 条 / 1 epoch） | 1.7% | **3.3%** | 3.3% |
-
-**v2 基座（248M tokens 全量语料，续训 211k 步 ≈ 8.6 亿训练 tokens）**
-
-| 任务档次 | 模型 | plain | single | two-phase |
-|---|---|---|---|---|
-| **easy** | CoT-SFT v2（60k 条 / 2 epochs） | **100.0%** | **100.0%** | 98.3% |
-| **hard** | CoT-SFT v2（80k 条 / 3 epochs） | 1.7% | 3.3% | 3.3% |
-
-> ⚠️ **下面两张表的 easy 准确率与旧 ppl 数字均需按新口径重读**（见本节末尾"口径修正"）：
-> 表里的 easy 100% 是在**与训练集 100% 重合**的留出集上测的，属于记忆而非泛化。
-
-ppl 对比（同一 `dataset/bins/pretrain_v3_full.bin`）：
-
-| 口径 | v1 | v2 | 说明 |
-|---|---|---|---|
-| 旧（`--max-rows 512`，取 bin 最前面的窗口 = 训练集 loss） | ppl 37.80 | ppl 23.66 | 仅同批窗口内横向可比 |
-| **新协议（`--split val`，497 窗，文档级零重叠）** | **ppl 33.56** | **ppl 15.82** | 可作为泛化指标 |
-
-规模换质量的结论不变且更明显：**33.56 → 15.82**。
-
-> **`best.pt` vs `final.pt` 的实测结论**：easy 任务上 `sft_v2_cot_easy/final.pt`（eval 1.7397）与
-> `sft_v2_cot_easy/checkpoint-12000.pth`（历史最优 eval 1.6109）准确率**完全相同**（100/100/98.3）；
-> hard 任务上 `sft_v2_cot_hard` 的 `best.pt` 与 `final.pt` 也完全相同（1.7/3.3/3.3）。
-> 说明这组 60 题留出集在 easy 档已经饱和、hard 档远未饱和，eval_loss 的小幅差异不足以改变准确率；
-> 但 `best.pt` 仍应作为默认选择（对话/续写这类开放式任务上，过拟合的 final 更容易跑偏）。
-
-**domain 基座（在 v2 上做代码领域增量续训：26,847 步 / 74 分钟 / lr=1e-4 / 混入 15% 通用语料）**
-
-| 任务档次 | 模型 | plain | single | two-phase |
-|---|---|---|---|---|
-| **easy** | CoT-SFT domain（60k 条 / 2 epochs） | **100.0%** | **100.0%** | 98.3% |
-| **hard** | CoT-SFT domain（80k 条 / 3 epochs） | 1.7% | 1.7% | 1.7% |
-
-**双口径 ppl（`--split val`，`scripts/run_domain_compare.sh` 产出）**
-
-| 评估语料 | v2 基座 | domain 基座 | 变化 | 旧口径（`--max-rows 512`）对照 |
-|---|---|---|---|---|
-| 代码领域 `code_domain.bin` | 84.56 | **28.02** | **−67%**（领域适配有效） | 80.79 → 28.72（−64%）|
-| 通用 `pretrain_v3_full.bin` | **15.82** | 22.93 | **+45%**（通用能力退化） | 23.66 → 33.43（+41%）|
-
-结论与经验：
-- **思考模式本身有效**：easy 任务从 0% → 90%（v1）→ 100%（v2 / domain），且推理过程可读、可截断、可隐藏。
-  ⚠️ 但这组 easy 数字**不能作为泛化证据**（见下方"口径修正"），只能说明"两阶段协议跑得通"。
-- **更强基座 + 更多 CoT 数据提升了拟合能力**：同口径 ppl 33.56 → 15.82。
-- **领域自适应 ≠ 无损**：1 epoch、lr=1e-4、只混 15% 通用语料，能把代码领域 ppl 打掉 67%，同时把通用 ppl
-  抬高 45%，下游对话 SFT 的 eval_loss 从 2.7795 升到 2.9087，`samples_domain_chat.txt` 里"你是谁"直接答
-  "抱歉，我无法回答这个问题。但我可以告诉你关于计算机程序的语法和编程模型"。**做领域续训必须双口径验收**：
-  `bash scripts/run_domain_compare.sh`；想两者兼得就降 lr（1e-5~3e-5）、提高混料比（30%+）、减少步数。
-- **容量是硬约束**：hard 任务上模型能学会"分步格式"（SFT 训练 loss ≈ 1.4），但多位数乘加仍会算错，
-  说明 47.9M 参数不足以支撑多位数推理；需按根 README「实测训练结果」的路线续训/放大模型，
-  或采用 **工具调用范式**（模型只生成算式，如 `27/3`，由 Python 计算结果再回填）。
-- **评测陷阱（重要）**：贪心做算术评测时 `repetition_penalty` 必须为 `1.0`。用 `1.2` 会惩罚重复出现的数字，
-  使 easy 准确率从 90% 虚假跌到 61.7%（我们踩过并已修正评测口径）。
-- **协议改进方向**：把 `最终答案：` 固定为 tokenizer 的特殊 token（并在 config 中声明），可让阶段切分 100% 稳定；
-  目前依赖自由生成 + 文本标记匹配，`marker_hit=False` 时会自动回退到直接作答。
-
-### 口径修正（2025-09，重要）
-
-两处历史口径问题已定位并修好，上面的数字请按新说明读：
-
-1. **CoT 留出集与训练集重合**：`build_cot_sft.py` 旧实现靠"换个 seed"避免重合，但 **easy profile 的操作数
-   只有 1..9，全部唯一题目仅 1063 个**，而训练集有 6 万行——实测旧 `cot_eval_easy_zh.jsonl` 的 156 条题目
-   **100%** 出现在训练集里（hard 33.5%）。所以 easy 的 100% 是记忆。
-   现已改为"先去重建池、再切留出集"，并落盘自检零重合，同时提供两份零重合留出集
-   （`dataset/sft/cot_eval_{easy,hard}_disjoint.jsonl`，后者已接进 `run_downstream_evals.sh`）；
-   easy 需要用 `--easy-max 20` 扩大题目空间后重新生成配套训练集再 SFT。**这两份新留出集上的准确率尚未测**。
-2. **ppl 评测取了训练窗口**：`evaluate_pretrain.py --max-rows N` 取的是 `.bin` 最前面的窗口，对参与过训练的
-   bin 而言即训练集 loss；且本语料按领域排序（头=中文创作、尾=英文选择题），实测同一 checkpoint 头/尾
-   ppl 可差 3 倍以上。现默认 `--split val`（均匀分块 + 双端对齐文档边界，与训练同一口径），上表已重测。
-
-
----
-
-## 9. 训练看板（实时监控）
-
-### 9.1 浏览器看板（每 5 秒自动刷新）
-```bash
-python3 scripts/train_dashboard.py --serve --port 8099 --refresh 5
-# 打开 http://127.0.0.1:8099
-```
-页面内容：进度条（step/target）、**loss 走势图（train+eval 双曲线，带坐标轴/网格/悬停显示 step 与数值）**、
-**grad_norm 走势图**、速率（s/step、k tok/s）与 ETA、GPU 利用率/显存/温度、最近 checkpoint 列表、日志尾部；
-训练重启次数也会显示（自愈守护每次重启 +1）。数据来自训练日志 + checkpoint 文件 + `nvidia-smi`，纯标准库实现，无需额外依赖。
-
-参数：`--log <训练日志> --out-dir <checkpoint 目录> --target-step <目标步数> --tokens-per-step <每步tokens> --refresh <秒>`。
-
-### 9.2 导出损失走势图 PNG（报告/README 用）
-```bash
-python3 scripts/train_dashboard.py --plot models/checkpoints/loss_curve.png
-```
-输出含 train/eval loss 双曲线 + 右侧 lr 曲线的 PNG（matplotlib，已装）。
-
-### 9.3 终端看板
-```bash
-bash scripts/watch_training.sh            # 默认 5 秒刷新
-# 或手动循环
-while true; do python3 scripts/train_dashboard.py --once; sleep 5; done
-```
-终端输出示例（实测）：
-```
-[2026-09-10 13:13:13]  训练看板（每 5s 刷新）
-进度: 63999/211000  (30.3%)  epoch=2  重启=0
-最新: train 3.3981 | eval 3.3945 | lr 5.70e-04 | grad 0.614
-eval损失走势(最近8点): █▆▄▇▅▄▂▁  ↓越低越好
-速率: 0.170s/step  24.1k tok/s  ETA 6.9h
-GPU: util 85% | mem 5107/6144MB | temp 63C
-checkpoints: checkpoint-56000.pth(12:02:27), checkpoint-60000.pth(12:58:13), checkpoint-64000.pth(13:09:44)
-```
-
-### 9.4 与 TensorBoard 的分工
-- **本看板**：轻量、只看关键训练信号（进度/损失/速率/ETA/GPU），适合盯盘。
-- **TensorBoard**（完整指标：直方图/图像/模型图/嵌入投影/文本，见 §4）：
-  ```bash
-  tensorboard --logdir models/checkpoints/pretrain_v2_full/tensorboard --port 6006
-  ```
+- RTX 20 系（Turing）不支持 FlashAttention-2：保持 `--model_flash_attn False`（默认）。
+- 换 tokenizer 只改 `--data_tokenizer_dir`（词表自动跟随，并与 `.bin` 的 `meta.vocab_size` 做强校验）；
+  本仓库默认 32k 中文 BPE `models/tokenizer_v3`——大词表（如 151k）在 6GB 卡上吞吐仅 ~2k tok/s。
+- `torch.compile` 在**固定序列长度**下收益最大（预训练 +66%）；SFT 变长 padding 会反复重编译，故默认不启用。

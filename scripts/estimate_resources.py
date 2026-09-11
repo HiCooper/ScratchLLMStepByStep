@@ -14,6 +14,12 @@
 小模型可能受显存带宽限制、大模型/多卡有通信损耗，实际值会有偏差。
 """
 import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+from minigpt.config import estimate_params  # noqa: E402  (参数量公式的单一实现)
 
 # 相对吞吐（以 RTX 2060 为 1×，锚点：134M 模型 fp16 实测 ≈ 2700 token/s）
 GPU_POWER = {
@@ -32,15 +38,6 @@ ANCHOR_TPS = 2700       # RTX 2060 fp16 实测 token/s
 
 # 常见 GPU 显存档位（GB）
 GPU_SIZES = [4, 6, 8, 12, 16, 24, 48, 80]
-
-
-def estimate_params(vocab, emb, layers, swiglu, qkv_merged, tie):
-    """参数量估算（默认架构：GELU + 独立/合并 QKV + 可选共享输出头）。"""
-    attn = 4 * emb * emb                              # Q/K/V/O 共 4 个 emb×emb 矩阵
-    ffn = (12 if swiglu else 8) * emb * emb           # SwiGLU 3 矩阵 / GELU 2 矩阵
-    emb_layer = vocab * emb                            # 词嵌入
-    out_head = 0 if tie else vocab * emb               # 输出头（共享则省掉）
-    return emb_layer + layers * (attn + ffn) + out_head
 
 
 def nearest_gpu(need_gb):
@@ -66,14 +63,16 @@ def main():
     p.add_argument("--emb-dim", type=int, default=768, help="隐藏维度 emb_dim")
     p.add_argument("--n-layers", type=int, default=12, help="层数")
     p.add_argument("--n-heads", type=int, default=12, help="注意力头数(仅展示，不影响参数量公式)")
-    p.add_argument("--swiglu", action="store_true", help="前馈用 SwiGLU(每层 +4×emb²)")
+    p.add_argument("--swiglu", action="store_true", help="前馈用 SwiGLU(中间维 8/3·d，参数量与 GELU 基本持平)")
     p.add_argument("--qkv-merged", action="store_true", help="合并 QKV 投影")
     p.add_argument("--tie", action="store_true", help="词嵌入与输出头共享权重(省 vocab×emb)")
     p.add_argument("--gpu", default="rtx2060", choices=list(GPU_POWER), help="目标 GPU")
     p.add_argument("--tokens", type=float, default=2e8, help="数据量(token 数)，默认 2 亿 ≈ 教程 1.2GB")
     args = p.parse_args()
 
-    params = estimate_params(args.vocab, args.emb_dim, args.n_layers, args.swiglu, args.qkv_merged, args.tie)
+    # qkv_merged 不改变参数量（仍是 3 个 emb×emb 矩阵），故不再作为入参
+    params = estimate_params(args.emb_dim, args.n_layers, args.vocab,
+                             use_swiglu=args.swiglu, tie_word_embeddings=args.tie)
     weight_mem = params * 16 / 1e9  # GB：16 字节/参数（fp16 模型2 + 梯度2 + fp32 主权重4 + 动量4 + 方差4）
 
     power = GPU_POWER[args.gpu]

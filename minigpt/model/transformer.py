@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import math
 from typing import Optional, Tuple
 from transformers import PreTrainedModel, PretrainedConfig, AutoTokenizer
+from minigpt.config import round_to_multiple
 from minigpt.model.attention import MultiHeadAttention, FlashMultiHeadAttention
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -52,10 +53,6 @@ def build_norm(norm_type: str, emb_dim: int):
     raise ValueError(f"未知的 norm_type: {norm_type!r}（可选 layernorm | rmsnorm）")
 
 
-def _round_to_multiple(value: float, multiple: int = 64) -> int:
-    return max(multiple, int(round(value / multiple)) * multiple)
-
-
 class FeedForward(nn.Module):
     def __init__(self, emb_dim:int, use_swiglu:bool=False, hidden_dim:int=0):
         """前馈层。
@@ -71,7 +68,7 @@ class FeedForward(nn.Module):
         super().__init__()
         self.use_swiglu = use_swiglu
         self.hidden_dim = int(hidden_dim) or (
-            _round_to_multiple(8 * emb_dim / 3) if use_swiglu else 4 * emb_dim)
+            round_to_multiple(8 * emb_dim / 3) if use_swiglu else 4 * emb_dim)
         if use_swiglu:
             # SwiGLU：gate 分支与 up 分支逐元素相乘，再 down 投影。
             # 现代 LLM(LLaMA/Mistral/Qwen)普遍采用；无 bias 与 qkv_bias=False 保持一致。

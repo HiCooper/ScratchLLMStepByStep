@@ -227,11 +227,20 @@ def resolve_stop_token_ids(tokenizer,
     return ids
 
 
-def split_dataset(data, train_ratio, eval_ratio):
+def split_train_eval_test(data, train_ratio, eval_ratio):
+    """按样本随机切成 (train, eval, test) 三段。
+
+    ⚠️ 与 `pretrain_dataset.split_dataset`（2 段、按窗口）语义不同，故改名消歧义。
+    `test` 段当前未被 `sft_trainer` 使用（只用了 train/eval），保留以兼容 notebook 13/14。
+    """
     train_len = int(len(data) * train_ratio)
     eval_len = int(len(data) * eval_ratio)
     test_len = len(data) - train_len - eval_len
     return torch.utils.data.random_split(data, [train_len, eval_len, test_len])
+
+
+# 兼容别名（notebook 13/14 与 sft_trainer 按旧名导入）
+split_dataset = split_train_eval_test
 
 def create_batch_collator(tokenizer, assistant_marker=DEFAULT_ASSISTANT_MARKER,
                           turn_end_marker=DEFAULT_TURN_END_MARKER):

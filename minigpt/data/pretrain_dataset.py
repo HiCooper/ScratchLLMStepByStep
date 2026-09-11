@@ -10,6 +10,7 @@ from torch.utils.data import Dataset, DataLoader,  random_split, Subset
 
 
 def read_text_dataset(data_path, max_size=100*1024*1024, content_key='text'):
+    """【教学用】按大小分块读取 jsonl 文本（notebook 08 演示；生产走 tokenize_jsonl_to_bin）。"""
     with open(data_path, 'r', encoding='utf-8') as f:
         current_size = 0
         current_texts = []
@@ -29,6 +30,11 @@ def read_text_dataset(data_path, max_size=100*1024*1024, content_key='text'):
                 current_size = 0
 
 class PretrainTextDataset(Dataset):
+    """【教学用】把文本在内存里切成窗口（notebook 08 演示）。
+
+    生产训练不要用它：需要先把全部文本 tokenize 进内存，语料一大就 OOM；
+    生产走 `tokenize_jsonl_to_bin` + `TokenBinDataset`（memmap）。
+    """
     def __init__(self, texts: list, tokenizer, max_length, stride=1):
         self.max_length = max_length
         self.stride = stride
@@ -49,20 +55,12 @@ class PretrainTextDataset(Dataset):
     def __getitem__(self, i):
         return self.input_set[i], self.target_set[i]
 
-def create_dataloaders_from_texts(texts_data, train_ratio, tokenizer, max_tokens, batch_size):
-    train_size = int(len(texts_data) * train_ratio)
-    train_texts = texts_data[:train_size]
-    eval_texts = texts_data[train_size:]
-
-    train_dataset = PretrainTextDataset(train_texts, tokenizer, max_tokens, max_tokens)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
-
-    eval_dataset = PretrainTextDataset(eval_texts, tokenizer, max_tokens, max_tokens)
-    eval_loader = DataLoader(eval_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
-
-    return train_loader, eval_loader
-
 def texts_to_bin(input_path, output_path, tokenizer, content_key="content"):
+    """【教学用·已过时】把 jsonl 拼成 uint16 token 流（notebook 08 演示）。
+
+    生产请用 `tokenize_jsonl_to_bin`：它按词表自动选 uint16/uint32、写 `.meta.json`、
+    只追加 eos 而不强拼 BOS 字符串。本函数硬编码 uint16，词表 >65535 会溢出。
+    """
     bos_token = tokenizer.special_tokens_map['bos_token']
     eos_token = tokenizer.special_tokens_map['eos_token']
     max_buffered_length = 1 * 1024 * 1024
@@ -94,18 +92,44 @@ def texts_to_bin(input_path, output_path, tokenizer, content_key="content"):
                 print(f"write arr: {len(arr)}")
 
 class PretrainBinaryDataset(Dataset):
-    def __init__(self, data_path, max_tokens):
-        # 二进制文件必须以 rb 打开，文本模式下 seek/tell 计算字节数不可靠
-        with open(data_path, 'rb') as f:
+    """【教学/链路验证用】按窗口切分的二进制数据集（uint16/uint32 自适应）。
+
+    真实事故：旧实现把 dtype 硬编码成 uint16 且不看 `.meta.json`——词表 >65535 的
+    uint32 产物会被读成"总 token 数翻倍、窗口全错位"的数据，`max_tokens` 大于总 token
+    时还会静默得到空数据集（len=0）后在别处报出难懂的错。现在：
+      - 读 meta 判断 dtype（与生产用的 `TokenBinDataset` 同一口径）；
+      - 文件字节数不是 itemsize 整数倍、或切不出一个完整窗口时，直接给出可读报错。
+    生产训练请用 `TokenBinDataset`（memmap，不整份读入内存）。
+    """
+
+    def __init__(self, data_path, max_tokens, meta_path=""):
+        self.data_path = data_path
+        self.max_tokens = int(max_tokens)
+        self.meta, self.meta_file = load_bin_meta(data_path, meta_path)
+        self.dtype = (self.meta or {}).get("dtype", "uint16")
+        if self.meta is None:
+            print(f"[data] 注意：{data_path} 没有 .meta.json，按 {self.dtype} 读取；"
+                  f"词表 >65535 的产物必须显式提供 meta（否则会读错）")
+        itemsize = np.dtype(self.dtype).itemsize
+        with open(data_path, "rb") as f:      # 必须以 rb 打开，文本模式下 tell 不可靠
             f.seek(0, 2)
-            self.total_tokens = f.tell() // np.dtype("uint16").itemsize
-            print(f"total_tokens: {self.total_tokens}")
-        
-        self.data = np.memmap(data_path, dtype=np.uint16, shape=(self.total_tokens//max_tokens, max_tokens))
+            nbytes = f.tell()
+        if nbytes % itemsize:
+            raise ValueError(
+                f"{data_path} 大小 {nbytes}B 不是 {self.dtype}({itemsize}B) 的整数倍："
+                f"dtype 与文件不匹配（meta.dtype={(self.meta or {}).get('dtype')!r}）")
+        self.total_tokens = nbytes // itemsize
+        rows = self.total_tokens // self.max_tokens
+        if rows == 0:
+            raise ValueError(
+                f"{data_path} 只有 {self.total_tokens} 个 token，不足一个窗口 "
+                f"(max_tokens={self.max_tokens})：请换更小的 --context-length 或更大的语料")
+        self.data = np.memmap(data_path, dtype=self.dtype, shape=(rows, self.max_tokens))
+        print(f"total_tokens: {self.total_tokens} (dtype={self.dtype}, rows={rows})")
 
     def __len__(self):
         return self.data.shape[0]
-    
+
     def __getitem__(self, index):
         if isinstance(index, int):
             return self._get_single_item(index)
@@ -120,35 +144,40 @@ class PretrainBinaryDataset(Dataset):
         assert isinstance(index, int)
         item = self.data[index]
         input = item[:-1].astype(np.int64)
-        target = item[1:].astype(np.int64)  # 在计算交叉熵损失时要求目标输出为长整型
-        # attention_mask = torch.ones(len(input), dtype=torch.int64)  # 长度与 input 相同
+        target = item[1:].astype(np.int64)  # 交叉熵要求目标为长整型
         return torch.from_numpy(input), torch.from_numpy(target)
-    
+
     def _get_list_items(self, indexes):
         assert isinstance(indexes, list)
-
         items = [self.data[index] for index in indexes]
         inputs = [item[:-1] for item in items]
-        targets = [item[1:] for item in items]  
-        # 在计算交叉熵损失时要求目标输出为长整型
-        input_tensors = torch.tensor(inputs, dtype=torch.int64)
-        target_tensors = torch.tensor(targets, dtype=torch.int64)
-        # 创建全1的 attention_mask，形状为 (batch_size, max_seq_length)  
-        # batch_size = len(inputs)  
-        # attention_mask = torch.ones(batch_size, input_tensors.size(1), dtype=torch.int64)  # 假设所有输入长度一致  
+        targets = [item[1:] for item in items]
+        return (torch.tensor(inputs, dtype=torch.int64),
+                torch.tensor(targets, dtype=torch.int64))
 
-        return input_tensors, target_tensors
-    
     def _get_slice_items(self, index):
-        # slice为内置切片对象，indices方法返回start, stop, step三个元素的元组, range(start, stop, step)则返回一个正常的索引迭代器
+        # slice.indices 返回 (start, stop, step)，range 得到正常索引迭代器
         return Subset(self, range(*index.indices(len(self))))
 
-def split_dataset(data, train_ratio):
+
+def split_train_eval_random(data, train_ratio):
+    """【随机窗口切分，非生产口径】按比例随机切成 (train, eval)。
+
+    ⚠️ 与 `sft_dataset.split_dataset`（3 段、按样本随机）语义不同，故改名消歧义。
+    生产预训练请用 `split_train_eval_blocks`：随机切会让同一文档的前半进训练集、
+    后半进验证集（文档中位仅 ~151 token，窗口 512 平均横跨 2.6 篇），eval_loss 偏乐观。
+    本函数保留给 notebook 09/10/11 与 validate_*.py 的教学/链路验证使用。
+    """
     train_len = int(len(data) * train_ratio)
     eval_len = len(data) - train_len
     return random_split(data, [train_len, eval_len])
 
+
+# 兼容别名（notebook 通过 %run 使用旧名；validate_*.py 也按此名导入）
+split_dataset = split_train_eval_random
+
 def create_dataloaders(ds, batch_size, train_ratio, local_rank=-1):
+    """【教学用】构造 train/eval DataLoader（notebook 10 演示；生产在 Trainer 内部构造）。"""
     train_set, eval_set = split_dataset(ds, train_ratio)
     sampler = DistributedSampler(train_set, rank=local_rank) if local_rank >= 0 else None
     shuffle = True if sampler == None else False

@@ -18,6 +18,11 @@ import glob
 import json
 import os
 import re
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+from minigpt.config import estimate_params_from_config  # noqa: E402
 from datetime import datetime
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -52,14 +57,12 @@ def _pick(cfg: dict, name: str, default=None):
 
 
 def estimate_params(cfg: dict) -> str:
+    """参数量展示（调用 config.py 的唯一实现，含 SwiGLU/8-3·d/tie/head-bias 开关）。
+
+    旧实现自带一份公式且忽略 SwiGLU —— 对 SwiGLU run 会多报 50% 前馈参数。
+    """
     try:
-        emb = int(_pick(cfg, "emb_dim", 512))
-        layers = int(_pick(cfg, "n_layers", 10))
-        vocab = int(_pick(cfg, "vocab_size", 0) or 32000)
-        tied = bool(_pick(cfg, "tie_word_embeddings", True))
-        per_layer = 12 * emb * emb          # attn(4) + FFN(8, 4x 扩展)
-        total = vocab * emb * (1 if tied else 2) + layers * per_layer
-        return f"{total/1e6:.1f}M"
+        return f"{estimate_params_from_config(cfg) / 1e6:.1f}M"
     except Exception:  # noqa: BLE001
         return "?"
 
