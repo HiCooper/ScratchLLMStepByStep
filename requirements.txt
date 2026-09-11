@@ -1,3 +1,12 @@
+# ⚠️ 单一事实来源是 pyproject.toml（本文件是它的 pip 等价视图，二者必须保持一致）。
+#    - [project].dependencies            -> 本文件"核心依赖"
+#    - [project.optional-dependencies].notebook -> 本文件 notebook 段（matplotlib/pandas）
+#    - [project.optional-dependencies].dev      -> 本文件 dev 段（pytest）
+#    - [project.optional-dependencies].flash    -> 本文件末尾注释里的 flash-attn
+#    用 pip 安装包本体（推荐）：
+#        pip install -e .            # 核心
+#        pip install -e ".[notebook,dev]"   # 含 notebook 与测试
+#    只想装依赖（不安装本包）： pip install -r requirements.txt
 # 核心依赖（版本为作者实测环境，可按需调整）
 torch>=2.4.0
 transformers>=4.42.0

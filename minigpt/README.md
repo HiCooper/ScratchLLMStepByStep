@@ -44,7 +44,7 @@ python scripts/generate.py --checkpoint models/checkpoints/sft_v1_512/final.pt \
     --tokenizer-dir models/tokenizer_v3 --chat --prompt "什么是AI？" \
     --do-sample --temperature 0.8 --top-k 50 --top-p 0.92 --repeat-penalty 1.2
 python scripts/evaluate_pretrain.py --checkpoint models/checkpoints/pretrain_v1_512/final.pt \
-    --tokenizer-dir models/tokenizer_v3 --bin dataset/bins/pretrain_v3_600k.bin --max-rows 512
+    --tokenizer-dir models/tokenizer_v3 --bin dataset/bins/pretrain_v3_full.bin --split val
 ```
 
 ## 2. 配置（`minigpt/config.py`）
@@ -214,9 +214,13 @@ python scripts/generate.py --checkpoint <ckpt> --tokenizer-dir <tok> \
     --max-new-tokens 128 --do-sample --temperature 0.8 --top-k 50 --top-p 0.92 \
     --repeat-penalty 1.2 --seed 0 [--output-file out.txt]
 
-# 验证集 loss / perplexity（--max-rows 限制窗口数以控制耗时；不传则评估全部窗口）
+# 验证集 loss / perplexity
+#   --split val（默认）= 均匀分块 + 双端对齐文档边界的留出集，与训练时 split_train_eval_blocks
+#   同一口径，切分范围记录在输出的 data_split 字段里，可跨 checkpoint 比较。
+#   ⚠️ --split all --max-rows N 取的是 .bin 最前面的窗口：对参与过训练的 bin 而言那是训练集
+#      loss，且本语料按领域排序，头/尾 ppl 实测可差 3 倍以上，不同 N 之间也不可比。
 python scripts/evaluate_pretrain.py --checkpoint <ckpt> --bin <bin> \
-    --tokenizer-dir <tok> --batch-size 8 --max-rows 512 --output metrics_eval.json
+    --tokenizer-dir <tok> --batch-size 8 --split val --output metrics_eval.json
 ```
 
 ### 5.3 吞吐优化（本机实测）
@@ -356,8 +360,17 @@ python3 scripts/eval_thinking.py \
 | **easy** | CoT-SFT v2（60k 条 / 2 epochs） | **100.0%** | **100.0%** | 98.3% |
 | **hard** | CoT-SFT v2（80k 条 / 3 epochs） | 1.7% | 3.3% | 3.3% |
 
-同切分 ppl 对比（同一 `dataset/bins/pretrain_v3_full.bin`、`--max-rows 512`）：
-v1 `eval_loss=3.6323 / ppl=37.80` → v2 `eval_loss=3.1637 / ppl=23.66`（loss −12.9%，ppl −37.4%）。
+> ⚠️ **下面两张表的 easy 准确率与旧 ppl 数字均需按新口径重读**（见本节末尾"口径修正"）：
+> 表里的 easy 100% 是在**与训练集 100% 重合**的留出集上测的，属于记忆而非泛化。
+
+ppl 对比（同一 `dataset/bins/pretrain_v3_full.bin`）：
+
+| 口径 | v1 | v2 | 说明 |
+|---|---|---|---|
+| 旧（`--max-rows 512`，取 bin 最前面的窗口 = 训练集 loss） | ppl 37.80 | ppl 23.66 | 仅同批窗口内横向可比 |
+| **新协议（`--split val`，497 窗，文档级零重叠）** | **ppl 33.56** | **ppl 15.82** | 可作为泛化指标 |
+
+规模换质量的结论不变且更明显：**33.56 → 15.82**。
 
 > **`best.pt` vs `final.pt` 的实测结论**：easy 任务上 `sft_v2_cot_easy/final.pt`（eval 1.7397）与
 > `sft_v2_cot_easy/checkpoint-12000.pth`（历史最优 eval 1.6109）准确率**完全相同**（100/100/98.3）；
@@ -372,18 +385,19 @@ v1 `eval_loss=3.6323 / ppl=37.80` → v2 `eval_loss=3.1637 / ppl=23.66`（loss �
 | **easy** | CoT-SFT domain（60k 条 / 2 epochs） | **100.0%** | **100.0%** | 98.3% |
 | **hard** | CoT-SFT domain（80k 条 / 3 epochs） | 1.7% | 1.7% | 1.7% |
 
-**双口径 ppl（同一 `--max-rows 512`，`scripts/run_domain_compare.sh` 产出）**
+**双口径 ppl（`--split val`，`scripts/run_domain_compare.sh` 产出）**
 
-| 评估语料 | v2 基座 | domain 基座 | 变化 |
-|---|---|---|---|
-| 代码领域 `code_domain.bin` | 4.3919 / ppl 80.79 | **3.3576 / ppl 28.72** | **−64%**（领域适配有效）|
-| 通用 `pretrain_v3_full.bin` | **3.1637 / ppl 23.66** | 3.5095 / ppl 33.43 | **+41%**（通用能力退化）|
+| 评估语料 | v2 基座 | domain 基座 | 变化 | 旧口径（`--max-rows 512`）对照 |
+|---|---|---|---|---|
+| 代码领域 `code_domain.bin` | 84.56 | **28.02** | **−67%**（领域适配有效） | 80.79 → 28.72（−64%）|
+| 通用 `pretrain_v3_full.bin` | **15.82** | 22.93 | **+45%**（通用能力退化） | 23.66 → 33.43（+41%）|
 
 结论与经验：
-- **思考模式本身有效**：easy 任务从 0% → 90%（v1）→ **100%（v2 / domain）**，且推理过程可读、可截断、可隐藏。
-- **更强基座 + 更多 CoT 数据直接转化为准确率**：同一切分 ppl 降 37%，easy 准确率从 90% 提到 100%。
-- **领域自适应 ≠ 无损**：1 epoch、lr=1e-4、只混 15% 通用语料，能把代码领域 ppl 打掉 64%，同时把通用 ppl
-  抬高 41%，下游对话 SFT 的 eval_loss 从 2.7795 升到 2.9087，`samples_domain_chat.txt` 里"你是谁"直接答
+- **思考模式本身有效**：easy 任务从 0% → 90%（v1）→ 100%（v2 / domain），且推理过程可读、可截断、可隐藏。
+  ⚠️ 但这组 easy 数字**不能作为泛化证据**（见下方"口径修正"），只能说明"两阶段协议跑得通"。
+- **更强基座 + 更多 CoT 数据提升了拟合能力**：同口径 ppl 33.56 → 15.82。
+- **领域自适应 ≠ 无损**：1 epoch、lr=1e-4、只混 15% 通用语料，能把代码领域 ppl 打掉 67%，同时把通用 ppl
+  抬高 45%，下游对话 SFT 的 eval_loss 从 2.7795 升到 2.9087，`samples_domain_chat.txt` 里"你是谁"直接答
   "抱歉，我无法回答这个问题。但我可以告诉你关于计算机程序的语法和编程模型"。**做领域续训必须双口径验收**：
   `bash scripts/run_domain_compare.sh`；想两者兼得就降 lr（1e-5~3e-5）、提高混料比（30%+）、减少步数。
 - **容量是硬约束**：hard 任务上模型能学会"分步格式"（SFT 训练 loss ≈ 1.4），但多位数乘加仍会算错，
@@ -393,6 +407,20 @@ v1 `eval_loss=3.6323 / ppl=37.80` → v2 `eval_loss=3.1637 / ppl=23.66`（loss �
   使 easy 准确率从 90% 虚假跌到 61.7%（我们踩过并已修正评测口径）。
 - **协议改进方向**：把 `最终答案：` 固定为 tokenizer 的特殊 token（并在 config 中声明），可让阶段切分 100% 稳定；
   目前依赖自由生成 + 文本标记匹配，`marker_hit=False` 时会自动回退到直接作答。
+
+### 口径修正（2025-09，重要）
+
+两处历史口径问题已定位并修好，上面的数字请按新说明读：
+
+1. **CoT 留出集与训练集重合**：`build_cot_sft.py` 旧实现靠"换个 seed"避免重合，但 **easy profile 的操作数
+   只有 1..9，全部唯一题目仅 1063 个**，而训练集有 6 万行——实测旧 `cot_eval_easy_zh.jsonl` 的 156 条题目
+   **100%** 出现在训练集里（hard 33.5%）。所以 easy 的 100% 是记忆。
+   现已改为"先去重建池、再切留出集"，并落盘自检零重合，同时提供两份零重合留出集
+   （`dataset/sft/cot_eval_{easy,hard}_disjoint.jsonl`，后者已接进 `run_downstream_evals.sh`）；
+   easy 需要用 `--easy-max 20` 扩大题目空间后重新生成配套训练集再 SFT。**这两份新留出集上的准确率尚未测**。
+2. **ppl 评测取了训练窗口**：`evaluate_pretrain.py --max-rows N` 取的是 `.bin` 最前面的窗口，对参与过训练的
+   bin 而言即训练集 loss；且本语料按领域排序（头=中文创作、尾=英文选择题），实测同一 checkpoint 头/尾
+   ppl 可差 3 倍以上。现默认 `--split val`（均匀分块 + 双端对齐文档边界，与训练同一口径），上表已重测。
 
 
 ---

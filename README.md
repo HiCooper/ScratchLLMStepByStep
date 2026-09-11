@@ -112,55 +112,81 @@ bash scripts/download_data.sh
 ## 💥 目录结构
 
 ```
+├── AGENTS.md                  # agent 入口：最短路径、环境预设、训练相关事实、硬性约定
+├── pyproject.toml             # 打包/依赖/pytest 配置（pip install -e . 后可直接 import minigpt）
+├── requirements.txt           # 与 pyproject.toml 等价的依赖清单（给 pip install -r 的用户，勿单独改）
 ├── notebooks/                 # 15 个课程 notebook，01_~15_ 前缀按课程顺序排序
-├── minigpt/                   # 可复用代码包（pip install -e . 或设置 PYTHONPATH=. 后 import）
-│   ├── config.py              # 集中管理超参与路径（RunConfig：model/data/train/paths 四段）
+├── minigpt/                   # 可复用代码包
+│   ├── README.md              # 包使用说明：指标面板、推理/评估、吞吐、续训注意事项
+│   ├── config.py              # RunConfig（model/data/train/paths 四段）+ CLI 覆盖 + 布尔解析
 │   ├── model/
 │   │   ├── attention.py       # 自注意力/多头注意力/FlashAttention/RoPE（KV cache 的因果判据）
-│   │   ├── transformer.py     # LayerNorm/FFN/TransformerBlock/GPTConfig/MiniGPT（含 _init_weights）
-│   │   ├── checkpoint.py      # 从 checkpoint 重建模型：config 优先，缺失则按权重形状反推
+│   │   ├── transformer.py     # LayerNorm/RMSNorm/FFN/TransformerBlock/GPTConfig/MiniGPT(+_init_weights)
+│   │   ├── checkpoint.py      # 重建模型（config 优先→形状反推）+ 宽容权重加载器
 │   │   └── generation.py      # 停止串/思考模式（两阶段 CoT）生成工具
 │   ├── data/
-│   │   ├── pretrain_dataset.py # 二进制语料(np.memmap/uint16-uint32) + 分块验证集切分 + 词表校验
-│   │   └── sft_dataset.py     # SFT 指令数据集/逐轮 assistant 掩码/停止符解析
+│   │   ├── pretrain_dataset.py # .bin(memmap/uint16-uint32) + 分块验证集切分 + 词表一致性校验
+│   │   └── sft_dataset.py     # SFT 数据集/逐轮 assistant 掩码/停止符解析
 │   └── train/
-│       ├── trainer.py         # 训练器(单卡/DDP、AMP、梯度累积、LR 调度、ckpt、指标钩子)
+│       ├── trainer.py         # 训练循环：AMP/梯度累积/eval/save/resume/DDP/compile 编排
+│       ├── schedule.py        # LR 调度（warmup+cosine）与 loss 记账（纯函数，可单测）
+│       ├── ddp_utils.py       # DDP 包装/解包/跨 rank 平均（纯工具，可在 CPU 单测）
+│       ├── checkpoint_io.py   # checkpoint payload 读写 + RNG/缩放器恢复
+│       ├── metrics.py         # TensorBoard 面板（标量/直方图/图像/投影/样本）
 │       ├── pretrainer.py      # 预训练入口（生产，支持 DDP）
 │       ├── sft_trainer.py     # SFT/指令微调入口
-│       ├── pretrainer_single.py # 单卡教学版训练器（notebook 09/10 使用）
-│       └── metrics.py         # TensorBoard 面板（标量/直方图/图像/投影/样本）
+│       └── pretrainer_single.py # 单卡教学版训练器（notebook 09/10 使用）
 ├── scripts/                   # 数据 / 训练 / 评测 / 监控
 │   ├── download_data.sh       # 从 ModelScope 下载 pretrain_t2t_mini.jsonl
 │   ├── train_tokenizer.py     # 训练 BPE 分词器（对应 notebook 01，支持 --max-lines 子集）
 │   ├── parquet_to_jsonl.py    # 领域 parquet 语料转 jsonl（可混入通用语料防遗忘）
-│   ├── build_pretrain_bin.py  # jsonl -> .bin + .meta.json（词表 >65535 自动 uint32）
-│   ├── build_cot_sft.py       # 生成 SFT / CoT 训练集与评测集（--profile easy|hard）
-│   ├── evaluate_pretrain.py   # loss/perplexity（--split val 走与训练同一口径的验证集）
+│   ├── build_pretrain_bin.py  # jsonl -> .bin + .meta.json（build / info，词表 >65535 自动 uint32）
+│   ├── build_cot_sft.py       # 生成 SFT / CoT 数据（--profile easy|hard，保证 train/eval 零重合）
+│   ├── evaluate_pretrain.py   # loss/perplexity（默认 --split val，与训练同一口径）
 │   ├── eval_thinking.py       # 思考模式评测（plain/single/two-phase）
 │   ├── generate.py            # 推理入口（--chat / --thinking）
 │   ├── train_dashboard.py     # 训练看板（--once 终端 / --serve 浏览器）
-│   ├── report_training.py     # 汇总 metrics.json 生成 TRAINING_REPORT.md
+│   ├── report_training.py     # 汇总 metrics.json 生成 TRAINING_REPORT.md（含"评估口径"列）
+│   ├── chat_probe.py          # 对话能力探针（多场景 × 贪心/采样 + 自动质检）
 │   ├── check_env.py           # 打印环境信息(Python/PyTorch/CUDA/GPU/CPU/包版本)
 │   ├── estimate_resources.py  # 估算参数量/显存/起步 GPU/训练时长
 │   ├── validate_pretrain.py   # 单卡端到端预训练验证（对应 notebook 09/10）
 │   ├── validate_ddp.py        # DDP 链路验证（nproc=1 单卡可跑，nproc=2 需真多卡）
-│   ├── train_pretrain_resilient.sh # 崩溃自动续训的长训守护（推荐入口）
+│   ├── train_pretrain_resilient.sh  # 崩溃自动续训的长训守护（推荐入口）
+│   ├── run_capacity_ablation.sh     # isotoken 容量消融：768/12/12 vs 512/10/8
 │   ├── checkpoint_janitor.sh  # checkpoint 空间守护（每目录保留最近 N 个）
-│   ├── run_downstream.sh / run_downstream_evals.sh # SFT + 下游评测流水线
+│   ├── run_downstream.sh / run_downstream_evals.sh  # SFT + 下游评测流水线
+│   ├── run_code_domain.sh / run_domain_compare.sh   # 领域增量续训与双口径 ppl 对比
+│   ├── wait_and_run_downstream.sh / watch_training.sh
 │   └── pretrain_start.sh      # torchrun DDP 多卡启动
-├── skills/minigpt-train/      # agent skill：SKILL.md + preflight/pipeline 一键脚本 + 参考文档
+├── skills/minigpt-train/      # agent skill（DSH 会扫描 skills/）
+│   ├── SKILL.md               # 完整流程、配置决策树、监控与汇报模板
+│   ├── references/            # training-recipes.md（超参/吞吐/预算换算）、troubleshooting.md
+│   └── scripts/               # preflight.sh / preflight.py 环境体检、pipeline.sh 一键流水线
 ├── tests/                     # 单元测试(pytest，CPU 即可运行，不需要数据与 GPU)
 │   ├── conftest.py            # 共享 fixture(小模型/迷你分词器) + sys.path 注入
-│   ├── test_attention.py      # 因果掩码/RoPE/padding 掩码/flash-attn 一致性
+│   ├── test_attention.py      # 因果掩码/RoPE/padding 掩码
 │   ├── test_transformer.py    # 前向/pos_cis 扩展/生成 + KV-cache 与全量前向等价性
-│   ├── test_init.py           # 权重初始化（embedding std/残差缩放/初始 loss）
+│   ├── test_init.py           # 权重初始化、norm_type/SwiGLU 宽度/head bias/rope_theta
 │   ├── test_ddp_unwrap.py     # DDP+torch.compile 解包与 checkpoint 键名
+│   ├── test_train_modules.py  # schedule / ddp_utils / checkpoint_io
+│   ├── test_trainer.py        # 梯度范数/累积/LR 调度/eval 触发/loss 记账/续训语义
+│   ├── test_metrics.py        # TensorBoard 面板（含 grads/* 与 tokens_per_sec 回归）
 │   ├── test_sft_masking.py    # 逐轮 assistant 掩码/padding/停止符
-│   ├── test_data_bin.py       # .bin 往返/memmap/分块切分/词表校验
-│   ├── test_trainer.py        # 梯度范数/累积/LR 调度/eval 触发/loss 记账
-│   └── test_config.py         # CLI 覆盖/布尔解析/config.json 往返/默认值一致性
+│   ├── test_data.py / test_data_bin.py  # 文本与二进制数据集、memmap、分块切分、词表校验
+│   ├── test_config.py         # CLI 覆盖/布尔解析/config.json 往返/默认值一致性
+│   ├── test_checkpoint_loader.py     # 结构反推与宽容加载
+│   ├── test_build_cot_sft.py  # CoT 训练/评测零重合
+│   ├── test_eval_scripts.py   # 评测脚本端到端 + --split 口径
+│   ├── test_generation.py / test_thinking.py / test_tokenizer.py
+│   ├── test_report.py / test_parquet_to_jsonl.py / test_chat_probe.py
+│   └── test_scripts_syntax.py # 所有 shell/python 脚本语法可编译
+├── dataset/                   # 语料与派生 .bin（.gitignore，不进仓库）
+├── models/                    # 分词器与训练产物 checkpoint（.gitignore，不进仓库）
 └── img/                       # 图片素材
 ```
+
+> 各包目录下的 `__init__.py` 仅为包标记（空文件），未在上图逐个列出。
 
 > ⚠️ **评测口径**：`scripts/evaluate_pretrain.py` 默认 `--split val`，即在 `.bin` 上按「均匀分块 + 双端对齐文档边界」切出的验证集（与训练时 `split_train_eval_blocks` 同一口径，见 `metrics.json:data_split`）。
 > 不要用 `--split all --max-rows N` 去评估**参与过训练**的 bin：那取的是文件最前面的窗口，得到的其实是训练集 loss，且本语料按领域排序、头尾分布差异极大（实测同一 checkpoint 头/尾 ppl 可差 3 倍以上），不同 `--max-rows` 之间也不可比。
