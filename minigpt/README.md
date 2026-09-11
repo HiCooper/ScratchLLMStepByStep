@@ -359,6 +359,12 @@ python3 scripts/eval_thinking.py \
 同切分 ppl 对比（同一 `dataset/bins/pretrain_v3_full.bin`、`--max-rows 512`）：
 v1 `eval_loss=3.6323 / ppl=37.80` → v2 `eval_loss=3.1637 / ppl=23.66`（loss −12.9%，ppl −37.4%）。
 
+> **`best.pt` vs `final.pt` 的实测结论**：easy 任务上 `sft_v2_cot_easy/final.pt`（eval 1.7397）与
+> `sft_v2_cot_easy/checkpoint-12000.pth`（历史最优 eval 1.6109）准确率**完全相同**（100/100/98.3）；
+> hard 任务上 `sft_v2_cot_hard` 的 `best.pt` 与 `final.pt` 也完全相同（1.7/3.3/3.3）。
+> 说明这组 60 题留出集在 easy 档已经饱和、hard 档远未饱和，eval_loss 的小幅差异不足以改变准确率；
+> 但 `best.pt` 仍应作为默认选择（对话/续写这类开放式任务上，过拟合的 final 更容易跑偏）。
+
 **domain 基座（在 v2 上做代码领域增量续训：26,847 步 / 74 分钟 / lr=1e-4 / 混入 15% 通用语料）**
 
 | 任务档次 | 模型 | plain | single | two-phase |
