@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 
 import argparse
+import json
+import warnings
+
 import pytest
 
 from minigpt.config import (DataConfig, ModelConfig, PathConfig, RunConfig, TrainConfig,
@@ -40,6 +43,51 @@ def test_apply_mapping_ignores_unknown():
     cfg = RunConfig()
     apply_mapping(cfg, {"train_unknown": 1, "nope": 2})
     assert not hasattr(cfg.train, "unknown")
+
+
+# ---------------------------------------------------------------------------
+# P0：配置文件里的键名拼错必须出声
+# （训练会把 config.json 落到输出目录、鼓励用户改完再用 --config-file 读回，
+#   静默忽略等于"某个超参压根没生效"却毫无提示）
+# ---------------------------------------------------------------------------
+def test_unknown_config_file_key_warns(tmp_path):
+    cfg = build_run_config(None)
+    path = tmp_path / "config.json"
+    dump_run_config(cfg, path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["model"]["emb_dimd"] = 768          # 嵌套形式拼错
+    data["train_batchsize"] = 4              # 扁平形式拼错
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.warns(UserWarning, match="无法对应到任何配置项") as record:
+        back = build_run_config(None, str(bad))
+
+    assert back.model.emb_dim == ModelConfig().emb_dim, "拼错的键不得被静默应用"
+    msg = str(record[0].message)
+    assert "model.emb_dimd" in msg and "train_batchsize" in msg
+
+
+def test_entry_specific_flags_do_not_warn():
+    """入口自有 flag（--pretrain/--sft-jsonl/--data_max_len/--n-heads…）不属于任何
+    Config section，不能因为加了它们就在每次训练时刷告警。"""
+    args = SimpleNamespace(
+        model_emb_dim=512, config_file="/tmp/c.json", pretrain="/tmp/x.pt",
+        sft_jsonl="/tmp/s.jsonl", data_max_len=256, n_heads=8,
+        model_n_layers=None, paths_output_dir=None,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        cfg = build_run_config(args)
+    assert cfg.model.emb_dim == 512
+
+
+def test_apply_mapping_returns_unknown_keys():
+    cfg = RunConfig()
+    with pytest.warns(UserWarning, match="无法对应到任何配置项"):
+        unknown = apply_mapping(cfg, {"model": {"nope": 1}, "train_batchsize": 2},
+                                source="config-file")
+    assert unknown == ["model.nope", "train_batchsize"]
 
 
 # ---------------------------------------------------------------------------

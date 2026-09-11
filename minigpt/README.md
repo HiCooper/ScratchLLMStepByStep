@@ -112,6 +112,11 @@ python scripts/generate.py --checkpoint <ckpt> --tokenizer-dir models/tokenizer_
 ```
 - 加 `--chat` 会套 chat 模板（`<|im_start|>user…<|im_start|>assistant`）；不加则是文本续写。
 - 特殊 token 默认隐藏：`<|im_end|>` 是 tokenizer_v3 的 eos(id=2)，模型输出它即**提前停止**（回合正常收尾）；`--keep-special-tokens` 看原始序列。
+- 加载**没有 `config` 字段**的老 checkpoint（如早期 `best.pt`）时，结构按权重形状反推；
+  其中 `n_heads` 无法反推（Q/K/V/O 都是 emb×emb，猜错不会报错、只会**静默**改变输出），
+  因此会打印 UserWarning。此时用 `--n-heads N` 显式确认（`generate.py` / `evaluate_pretrain.py` /
+  `eval_thinking.py` / `chat_probe.py` / `sft_trainer.py` 均支持）；当前训练入口写出的 checkpoint
+  一律自带 `config`，不受影响。
 
 ```bash
 # 验证集 loss / perplexity

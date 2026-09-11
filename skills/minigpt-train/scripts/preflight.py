@@ -288,11 +288,21 @@ def check_tests(quick: bool):
     if quick:
         warn("tests", "已跳过（--quick）")
         return
-    out = sh(f"cd {ROOT} && python3 -m pytest tests/ -q 2>&1 | tail -2", timeout=300)
-    if "passed" in out:
-        ok("tests", out.replace("\n", " | "))
+    # 这里**不能**再写 `-q`：pyproject 的 addopts 已经是 `-q`，叠加成 `-qq` 后 pytest
+    # 连 "213 passed" 汇总行都不打印（实测），加上末尾的 warnings summary 会把
+    # `tail -2` 挤成 "-- Docs: ..."，于是门禁永远误报"pytest 输出异常"。
+    # 正解：只依赖 addopts 的单个 -q，并从全量输出里正则匹配汇总行；
+    # failed/error 一律升级为 BLOCKER（测试不过就不该开训）。
+    out = sh(f"cd {ROOT} && python3 -m pytest tests/ 2>&1", timeout=900)
+    m = re.search(r"^.*?(\d+ (?:passed|failed|error)\b.*)$", out, re.M)
+    summary = m.group(1).strip() if m else ""
+    if summary and "failed" not in summary and "error" not in summary:
+        ok("tests", summary)
+    elif summary:
+        blocker("tests", summary, "cd 仓库根目录执行 pytest tests/ 查看失败用例")
     else:
-        warn("tests", f"pytest 输出异常: {out[:200]}", "cd 仓库根目录执行 pytest tests/ -q 查看详情")
+        warn("tests", f"pytest 输出异常: {out[-200:]}",
+             "cd 仓库根目录执行 pytest tests/ 查看详情")
 
 
 def check_services():

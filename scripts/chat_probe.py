@@ -135,6 +135,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--tokenizer-dir", default="models/tokenizer_v3")
+    ap.add_argument("--n-heads", type=int, default=None, help="覆盖 config-less checkpoint 反推出的注意力头数（n_heads 无法从权重形状反推；有 config 时以 config 为准）")
     ap.add_argument("--scenarios", default="eval_sets/chat_scenarios_zh.jsonl")
     ap.add_argument("--output", default=None, help="txt 报告路径；默认与 checkpoint 同目录")
     ap.add_argument("--modes", default="greedy,sampled",
@@ -153,7 +154,8 @@ def main():
 
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_dir)
-    model, ckpt, kws = build_model_from_checkpoint(args.checkpoint, tokenizer=tokenizer, device=device)
+    model, ckpt, kws = build_model_from_checkpoint(args.checkpoint, tokenizer=tokenizer,
+                                              device=device, n_heads=args.n_heads)
     model.eval()
 
     scenarios = load_scenarios(args.scenarios)

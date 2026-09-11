@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import warnings
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 
@@ -128,15 +129,20 @@ def build_run_config(cli_args=None, yaml_path: str | None = None) -> RunConfig:
     if yaml_path:
         with open(yaml_path, encoding="utf-8") as f:
             data = json.load(f)
-        apply_mapping(cfg, data)
+        # 配置文件的键名错误必须**出声**：训练会把 config.json 落到输出目录、鼓励用户改完
+        # 再用 --config-file 读回，静默忽略等于"某个超参压根没生效"却毫无提示。
+        apply_mapping(cfg, data, source="config-file")
     if cli_args is not None:
         overrides = {k: v for k, v in vars(cli_args).items()
                      if v is not None and not (isinstance(v, str) and v == "")}
-        apply_mapping(cfg, overrides)
+        # CLI 侧不校验未知键：入口除 Config 字段外还有自己的 flag（--pretrain/--sft-jsonl/
+        # --data_max_len/--n-heads 等），它们本就不属于任何 Config section。argparse 已经
+        # 挡住了拼错的 --flag，真正有风险的是手写 json。
+        apply_mapping(cfg, overrides, source="cli")
     return cfg
 
 
-def apply_mapping(cfg: RunConfig, mapping: dict) -> None:
+def apply_mapping(cfg: RunConfig, mapping: dict, source: str = "cli") -> list:
     """把配置写进 RunConfig，同时支持两种键形式：
 
     - 扁平：`{'model_emb_dim': 384, 'train_batch_size': 8}`（CLI 覆盖）
@@ -145,28 +151,47 @@ def apply_mapping(cfg: RunConfig, mapping: dict) -> None:
     真实事故：`dump_run_config` 写的是嵌套结构，而这里以前只认扁平键，于是
     `--config-file <dump 出来的 config.json>` 完全 no-op（emb_dim 从 512 静默
     回退到 384），与 pretrainer 的文档承诺矛盾。
+
+    `source="config-file"` 时，无法归位的键会收集起来发 UserWarning（返回同样一份列表），
+    避免手写 json 里的 `model_emb_dimd` 这类拼写错误被静默吞掉。
     """
+    unknown: list[str] = []
     for key, value in mapping.items():
         # 嵌套形式：{section: {field: value}}
         holder = getattr(cfg, key, None)
         if holder is not None and is_dataclass(holder):
             if not isinstance(value, dict):
+                unknown.append(key)
                 continue
             target = {f.name for f in fields(holder)}
             for attr, v in value.items():
                 if attr in target:
                     setattr(holder, attr, v)
+                else:
+                    unknown.append(f"{key}.{attr}")
             continue
         # 扁平形式：<section>_<field>
         if "_" not in key:
+            unknown.append(key)
             continue
         prefix, attr = key.split("_", 1)
         holder = getattr(cfg, prefix, None)
         if holder is None or not is_dataclass(holder):
+            unknown.append(key)
             continue
         target = {f.name for f in fields(holder)}
         if attr in target:
             setattr(holder, attr, value)
+        else:
+            unknown.append(key)
+    if unknown and source == "config-file":
+        warnings.warn(
+            f"{source} 中有 {len(unknown)} 个键无法对应到任何配置项，已忽略：{sorted(unknown)[:8]}"
+            f"{' ...' if len(unknown) > 8 else ''}。"
+            f"请核对键名（合法形式：model.emb_dim 或 model_emb_dim）；"
+            f"这些键对应的超参将保持默认值。",
+            UserWarning, stacklevel=2)
+    return unknown
 
 
 def round_to_multiple(value: float, multiple: int = 64) -> int:

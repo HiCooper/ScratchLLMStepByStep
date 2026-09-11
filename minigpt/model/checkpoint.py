@@ -8,12 +8,15 @@
 2. 没有 `config` 就从 `model_state` 的权重形状反推结构（emb_dim / n_layers / vocab_size /
    context_length / qkv_bias / use_swiglu / tie_word_embeddings），保证老产物也能用。
 
-`n_heads` 无法从形状反推，按 `emb_dim // 64` 猜测（512→8、768→12，与本仓库各预设一致），
-并在返回的 `inferred` 里标注，便于调用方提示用户。
+`n_heads` 无法从形状反推（Q/K/V/O 都是 (emb, emb)，pos_cis 不入 state_dict），只能按
+`emb_dim // 64` 猜测；猜错**不会**触发形状报错，只会静默改变 head_dim 与输出。因此该路径
+会发出 UserWarning，并提供 `n_heads=` 显式覆盖口（各下游脚本的 `--n-heads`），
+返回值里的 `inferred` 也标注了"结构来自推断"。
 """
 from __future__ import annotations
 
 import re
+import warnings
 from typing import Any
 
 import torch
@@ -39,6 +42,10 @@ CONFIG_KEYS = ("emb_dim", "n_layers", "n_heads", "context_length", "drop_rate", 
 # 旧产物存在、新结构不再产生的键：属良性差异，加载时忽略而不是报错
 LEGACY_UNEXPECTED_KEYS = ("out_head.bias",)
 
+# n_heads 无法从权重形状反推时的兜底除数（本仓库 512→8、768→12 满足，但 cpu 预设
+# 128/2/4、gpu-tiny 预设 384/8/8 **不满足**，所以猜错是常态而不是例外）
+N_HEADS_HEURISTIC_DIVISOR = 64
+
 
 def _is_tied(state_dict: dict) -> bool:
     """判断是否权重共享：`out_head.weight` 与 `token_emb.weight` 指向同一份存储。
@@ -55,8 +62,17 @@ def _is_tied(state_dict: dict) -> bool:
         return False
 
 
-def infer_model_kwargs(state_dict: dict) -> dict:
-    """从 state_dict 的权重形状反推模型结构参数。"""
+def infer_model_kwargs(state_dict: dict, n_heads: int | None = None) -> dict:
+    """从 state_dict 的权重形状反推模型结构参数。
+
+    `n_heads` 是**唯一无法反推**的字段（Q/K/V/O 都是 (emb, emb)，pos_cis 是 non-persistent
+    buffer），不传就只能按 `emb_dim // N_HEADS_HEURISTIC_DIVISOR` 猜，并发出 UserWarning。
+
+    为什么必须告警（真实隐患）：猜错不会触发任何 missing/unexpected —— 权重形状全对，
+    只是 head_dim 变了，模型**静默**算出不同结果。实测 384/8/8 的 state_dict 被推成
+    n_heads=6（head_dim 64 而非 48）：`load_state_into_model` 报 missing=0/unexpected=0，
+    而 logits max|diff|=0.12、argmax 已经不一致。
+    """
     if TOKEN_EMB not in state_dict:
         raise ValueError(f"state_dict 缺少 {TOKEN_EMB}，无法推断模型结构")
     emb = state_dict[TOKEN_EMB]
@@ -71,12 +87,21 @@ def infer_model_kwargs(state_dict: dict) -> dict:
             ctx = int(v.shape[-1])
             break
 
+    if n_heads is None:
+        n_heads = max(1, emb_dim // N_HEADS_HEURISTIC_DIVISOR)
+        warnings.warn(
+            f"checkpoint 未携带 config：n_heads 无法从权重形状反推，已按 "
+            f"emb_dim({emb_dim})//{N_HEADS_HEURISTIC_DIVISOR}={n_heads} 猜测。"
+            f"猜错不会报错，只会静默改变 head_dim 与模型输出"
+            f"（本仓库 cpu 预设 128/2/4 与 gpu-tiny 预设 384/8/8 都不满足该经验公式）。"
+            f"请显式指定头数（CLI 一般提供 --n-heads）以确认。",
+            UserWarning, stacklevel=2)
+
     kws: dict[str, Any] = {
         "vocab_size": vocab_size,
         "emb_dim": emb_dim,
         "n_layers": n_layers,
-        # 头数无法反推：沿用本仓库惯例 emb_dim/64（512→8, 768→12）
-        "n_heads": max(1, emb_dim // 64),
+        "n_heads": int(n_heads),
         "qkv_bias": any(k.endswith(WQ_BIAS_SUFFIX) for k in state_dict),
         "use_swiglu": any(k.endswith(SWIGLU_SUFFIX) for k in state_dict),
         "tie_word_embeddings": _is_tied(state_dict),
@@ -133,11 +158,16 @@ def load_state_into_model(model, state_dict: dict, allow_missing=(), allow_unexp
     return missing, unexpected
 
 
-def model_kwargs_from_checkpoint(ck: dict, vocab_size: int | None = None) -> tuple[dict, bool]:
+def model_kwargs_from_checkpoint(ck: dict, vocab_size: int | None = None,
+                                 n_heads: int | None = None) -> tuple[dict, bool]:
     """返回 (GPTConfig 关键字, 是否由权重形状推断而来)。
 
     `vocab_size`（一般为 tokenizer 词表大小）必须与 checkpoint 的 embedding 行数一致，
     不一致说明 checkpoint 与 tokenizer 不配套，直接给出可读报错而不是 `size mismatch` 堆栈。
+
+    `n_heads` 只在"checkpoint 没带 config"时生效（有 config 时以 config 为准，它才可靠）：
+    它是唯一无法从权重反推的字段，显式传入可消除 `infer_model_kwargs` 的猜测告警；
+    不传则沿用 `emb_dim // 64` 兜底并发出 UserWarning。
     """
     cfg = ck.get("config") if isinstance(ck, dict) else None
     state = ck.get("model_state", {}) if isinstance(ck, dict) else {}
@@ -147,8 +177,12 @@ def model_kwargs_from_checkpoint(ck: dict, vocab_size: int | None = None) -> tup
         kws = {k: cfg[k] for k in CONFIG_KEYS if k in cfg}
         inferred = False
         declared = int(kws.get("vocab_size") or emb_vocab or 0)
+        if n_heads is not None and int(n_heads) != int(kws.get("n_heads", n_heads)):
+            warnings.warn(
+                f"该 checkpoint 自带 config，n_heads 以 config 的 {kws.get('n_heads')} 为准，"
+                f"忽略显式传入的 {int(n_heads)}。", UserWarning, stacklevel=2)
     else:
-        kws = infer_model_kwargs(state)
+        kws = infer_model_kwargs(state, n_heads=n_heads)
         inferred = True
         declared = emb_vocab
 
@@ -170,14 +204,17 @@ def load_checkpoint(path: str, map_location: str = "cpu") -> dict:
 
 
 def build_model_from_checkpoint(path: str, tokenizer=None, device: str = "cpu",
-                                verbose: bool = False) -> tuple[MiniGPT, dict, dict]:
+                                verbose: bool = False,
+                                n_heads: int | None = None) -> tuple[MiniGPT, dict, dict]:
     """按 checkpoint 自带的 config（缺失则反推）重建模型并加载权重。
+
+    `n_heads` 同 `model_kwargs_from_checkpoint`：仅用于 config-less 老产物，见其文档。
 
     返回 (model, checkpoint, model_kwargs)。
     """
     ck = load_checkpoint(path, map_location="cpu")
     vocab_size = len(tokenizer) if tokenizer is not None else None
-    kws, inferred = model_kwargs_from_checkpoint(ck, vocab_size=vocab_size)
+    kws, inferred = model_kwargs_from_checkpoint(ck, vocab_size=vocab_size, n_heads=n_heads)
     if inferred and verbose:
         print(f"[ckpt] {path} 未携带 config，按权重形状推断结构：{kws}")
     gpt = GPTConfig(**kws)

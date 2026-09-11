@@ -58,6 +58,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--tokenizer-dir", default="models/tokenizer_v3")
+    ap.add_argument("--n-heads", type=int, default=None, help="覆盖 config-less checkpoint 反推出的注意力头数（n_heads 无法从权重形状反推；有 config 时以 config 为准）")
     ap.add_argument("--eval-jsonl", default="dataset/sft/cot_eval_zh.jsonl")
     ap.add_argument("--n", type=int, default=60)
     ap.add_argument("--max-new-tokens", type=int, default=80)
@@ -74,7 +75,8 @@ def main():
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_dir)
     # 优先用 checkpoint 自带 config，缺失（如老版本 best.pt / 周期 checkpoint）则按权重形状反推
-    model, ck, kws = build_model_from_checkpoint(args.checkpoint, tokenizer=tokenizer, device=device)
+    model, ck, kws = build_model_from_checkpoint(args.checkpoint, tokenizer=tokenizer,
+                                            device=device, n_heads=args.n_heads)
     print(f"[ckpt] {args.checkpoint} arch={kws.get('emb_dim')}/{kws.get('n_layers')}/"
           f"{kws.get('n_heads')} ctx={kws.get('context_length')}")
 

@@ -27,6 +27,7 @@ from minigpt.data.sft_dataset import (InstructionDataset, create_batch_collator,
 from minigpt.model.checkpoint import load_state_into_model, model_kwargs_from_checkpoint
 from minigpt.model.transformer import GPTConfig, MiniGPT
 from minigpt.train.optim import build_optimizer
+from minigpt.train.train_args import as_train_args
 from minigpt.train.trainer import Trainer
 
 
@@ -36,6 +37,10 @@ def parse_args():
     ap.add_argument("--pretrain", default="", help="预训练 checkpoint（final.pt/checkpoint-N.pth），缺省随机初始化")
     ap.add_argument("--sft-jsonl", default=None)
     ap.add_argument("--data_max_len", type=int, default=512)
+    # 仅对"没有 config 字段"的老 checkpoint 生效：n_heads 无法从权重形状反推，
+    # 不显式给出就只能按 emb_dim//64 猜（猜错会**静默**改变输出，checkpoint.py 会告警）
+    ap.add_argument("--n-heads", type=int, default=None,
+                    help="覆盖 config-less checkpoint 反推出的注意力头数（有 config 时以 config 为准）")
     for section, cls in (("model", ModelConfig), ("data", DataConfig),
                          ("train", TrainConfig), ("paths", PathConfig)):
         add_cli_overrides(ap, section, cls)
@@ -69,7 +74,8 @@ def main():
     # 架构：优先继承预训练 checkpoint 的 config；缺失时按权重形状反推；最后才用 CLI/默认配置
     if args.pretrain:
         base = torch.load(args.pretrain, map_location="cpu", weights_only=False)
-        kws, inferred = model_kwargs_from_checkpoint(base, vocab_size=len(tokenizer))
+        kws, inferred = model_kwargs_from_checkpoint(base, vocab_size=len(tokenizer),
+                                                     n_heads=args.n_heads)
         if inferred and rank0:
             print(f"[sft] {args.pretrain} 未携带 config，已按权重形状推断结构：{kws}")
     else:
@@ -108,29 +114,12 @@ def main():
         raise RuntimeError("SFT 数据过少（train/eval 为空），请调大 --data_max_lines 或换更大的数据文件")
     collator = create_batch_collator(tokenizer)
 
-    train_args = {
-        "train_batch_size": tc.batch_size,
-        "eval_strategy": "step",
-        "eval_steps": tc.eval_steps,
-        "warmup_steps": tc.warmup_steps,
-        "save_strategy": "step",
-        "save_steps": tc.save_steps,
-        "save_best": tc.save_best,
-        "reset_step": tc.reset_step,
-        "extra_steps": tc.extra_steps,
-        "num_train_epochs": tc.epochs,
-        "max_steps": tc.max_steps,
-        "gradient_accumulation_steps": tc.grad_accumulation_steps,
-        "grad_clip": tc.grad_clip,
-        "output_dir": pc.output_dir,
-        "last_checkpoint_path": pc.last_checkpoint_path,
-        "use_mixed_precision": tc.mixed_precision_dtype != "none",
-        "mixed_precision_dtype": tc.mixed_precision_dtype
-        if tc.mixed_precision_dtype in ("float16", "bfloat16") else "float16",
-        "seed": tc.seed,
-        "ddp_timeout_seconds": tc.ddp_timeout_seconds,
-        "deterministic_cudnn": tc.deterministic_cudnn,
-    }
+    # 与预训练共用同一份翻译层（minigpt/train/train_args.py）：以前 sft 侧手写 dict 漏传了
+    # torch_compile / num_workers / compile_mode，导致 --train_torch_compile 在此静默无效。
+    train_args = as_train_args(tc, pc)
+    if train_args["torch_compile"] and rank0:
+        print("[sft] 注意：SFT 是变长序列，torch.compile 会因形状变化反复重编译，"
+              "收益通常低于预训练（如无实测收益建议 --train_torch_compile False）")
     trainer = Trainer(model, optimizer, train_args, device=device, verbose=rank0)
     if rank0:
         try:

@@ -22,9 +22,10 @@ from minigpt.model.generation import generate_with_thinking  # noqa: E402
 from minigpt.model.checkpoint import build_model_from_checkpoint  # noqa: E402
 
 
-def load_model(checkpoint_path, tokenizer):
+def load_model(checkpoint_path, tokenizer, n_heads=None):
     """加载 checkpoint：优先用其自带 config，缺失则按权重形状反推（兼容老产物）。"""
-    model, ckpt, kws = build_model_from_checkpoint(checkpoint_path, tokenizer=tokenizer)
+    model, ckpt, kws = build_model_from_checkpoint(checkpoint_path, tokenizer=tokenizer,
+                                                 n_heads=n_heads)
     print(f"[ckpt] arch={kws.get('emb_dim')}/{kws.get('n_layers')}/{kws.get('n_heads')} "
           f"ctx={kws.get('context_length')} vocab={kws.get('vocab_size')}")
     return model, ckpt.get("step"), ckpt.get("eval_loss")
@@ -42,6 +43,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--tokenizer-dir", default="models/tokenizer_v3")
+    ap.add_argument("--n-heads", type=int, default=None, help="覆盖 config-less checkpoint 反推出的注意力头数（n_heads 无法从权重形状反推；有 config 时以 config 为准）")
     ap.add_argument("--prompt", action="append", default=[])
     ap.add_argument("--prompt-file", default=None)
     ap.add_argument("--interactive", action="store_true")
@@ -69,7 +71,8 @@ def main():
     torch.manual_seed(args.seed) if args.seed else None
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_dir)
-    model, ckpt_step, ckpt_eval = load_model(args.checkpoint, tokenizer)
+    model, ckpt_step, ckpt_eval = load_model(args.checkpoint, tokenizer,
+                                         n_heads=getattr(args, "n_heads", None))
     model.to(device)
     print(f"[generate] loaded {args.checkpoint} step={ckpt_step} eval_loss={ckpt_eval} "
           f"vocab={len(tokenizer)} device={device}")

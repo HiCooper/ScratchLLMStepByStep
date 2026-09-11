@@ -19,6 +19,8 @@ from minigpt.train.schedule import LossAccumulator, get_dynamic_lr
 
 class Trainer:
     def __init__(self, model, optimizer, train_args:dict, device='cpu', verbose=False):
+        # train_args 的键集合是「Trainer 实际读取的键」，由 minigpt/train/train_args.py
+        # 统一产出；入口不得再手写这个 dict（tests/test_train_args.py 会双向校验）。
         self.cur_time = lambda: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time()))
         self.model = model
         self.optimizer = optimizer

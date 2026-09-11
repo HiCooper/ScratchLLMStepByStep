@@ -398,10 +398,20 @@ class MiniGPT(PreTrainedModel):
                 # 不使用缓存时，每次都对最后 context_length 个 token 完整前向
                 step_input = input_ids[:, -self.context_length:]
             # attention_mask 需与「已缓存长度 + 本步长度」对齐；随生成同步增长（新 token 视为有效）
+            #
+            # 两条分支的切片方向**不同**（真实事故）：
+            #   - 带 KV cache：序列从位置 0 起连续增长、从不丢头部，取前缀 [0, past+len) 正确；
+            #   - 不带 cache：step_input 是"最后 context_length 个 token"，掩码必须跟着取
+            #     **尾部**同一窗口。旧实现统一取前缀，prompt 长于 context_length 时会把
+            #     attention_mask[:, :ctx] 这一整段（通常全 0）当成 padding 喂进去，注意力
+            #     退化成均匀分布——不报错、不 NaN，只是静默掉点。
             step_mask = attention_mask
             if attention_mask is not None:
-                past_len = 0 if past_kvs is None else past_kvs[0][0].shape[1]
-                step_mask = attention_mask[:, :past_len + step_input.shape[1]]
+                if use_kv_cache:
+                    past_len = 0 if past_kvs is None else past_kvs[0][0].shape[1]
+                    step_mask = attention_mask[:, :past_len + step_input.shape[1]]
+                else:
+                    step_mask = attention_mask[:, -step_input.shape[1]:]
             output = self(step_input, attention_mask=step_mask, use_kv_cache=use_kv_cache,
                           past_kvs=past_kvs, return_dict=True, **kwargs)  # shape: batch, n_tokens, vocab_size
             past_kvs = output["past_key_values"] if use_kv_cache else None

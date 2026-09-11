@@ -26,6 +26,7 @@ from minigpt.data.pretrain_dataset import (TokenBinDataset, split_train_eval_blo
                                            validate_bin_tokenizer)
 from minigpt.model.transformer import GPTConfig, MiniGPT
 from minigpt.train.optim import build_optimizer, param_group_summary
+from minigpt.train.train_args import as_train_args
 from minigpt.train.trainer import Trainer
 
 
@@ -92,32 +93,9 @@ def main():
     optimizer = build_optimizer(model, lr=tc.learning_rate, weight_decay=tc.weight_decay)
     if rank0:
         print(f"[pretrainer] optimizer_groups={param_group_summary(optimizer)}")
-    train_args = {
-        "train_batch_size": tc.batch_size,
-        "eval_strategy": "step",
-        "eval_steps": tc.eval_steps,
-        "warmup_steps": tc.warmup_steps,
-        "save_strategy": "step",
-        "save_steps": tc.save_steps,
-        "save_best": tc.save_best,
-        "reset_step": tc.reset_step,
-        "extra_steps": tc.extra_steps,
-        "num_train_epochs": tc.epochs,
-        "max_steps": tc.max_steps,
-        "gradient_accumulation_steps": tc.grad_accumulation_steps,
-        "grad_clip": tc.grad_clip,
-        "output_dir": pc.output_dir,
-        "last_checkpoint_path": pc.last_checkpoint_path,
-        "use_mixed_precision": tc.mixed_precision_dtype != "none",
-        "mixed_precision_dtype": tc.mixed_precision_dtype
-        if tc.mixed_precision_dtype in ("float16", "bfloat16") else "float16",
-        "num_workers": tc.num_workers,
-        "seed": tc.seed,
-        "ddp_timeout_seconds": tc.ddp_timeout_seconds,
-        "deterministic_cudnn": tc.deterministic_cudnn,
-        "torch_compile": tc.torch_compile,
-        "compile_mode": tc.compile_mode,
-    }
+    # TrainConfig/PathConfig -> Trainer 的翻译只有一份实现（minigpt/train/train_args.py）：
+    # 两个入口以前各自手写映射，已经漂移到"sft 侧漏传 torch_compile/num_workers 而 flag 照样出现在 --help"。
+    train_args = as_train_args(tc, pc)
     trainer = Trainer(model, optimizer, train_args, device=device, verbose=rank0)
     if rank0:
         try:
