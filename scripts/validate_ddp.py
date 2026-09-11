@@ -15,6 +15,12 @@
 默认用小模型，便于快速验证。
 """
 import argparse
+import os
+import sys
+
+# 允许直接 `python scripts/validate_ddp.py` / torchrun 运行（与仓库内其他脚本一致）
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
 import torch
 from transformers import AutoTokenizer
 

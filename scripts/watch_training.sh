@@ -1,7 +1,7 @@
 #!/bin/bash
 # 终端训练看板：每 5 秒刷新（Ctrl-C 退出）
 # 用法：bash scripts/watch_training.sh [刷新秒数] [训练日志] [checkpoint目录]
-set -uo pipefail
+set -euo pipefail
 cd "$(dirname "$0")/.."
 REFRESH="${1:-5}"
 LOG="${2:-models/checkpoints/pretrain_v2_full.log}"

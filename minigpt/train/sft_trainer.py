@@ -24,7 +24,7 @@ from minigpt.config import (DataConfig, ModelConfig, TrainConfig, PathConfig,
                             add_cli_overrides, build_run_config, dump_run_config)
 from minigpt.data.sft_dataset import (InstructionDataset, create_batch_collator,
                                       resolve_stop_token_ids, split_dataset)
-from minigpt.model.checkpoint import model_kwargs_from_checkpoint
+from minigpt.model.checkpoint import load_state_into_model, model_kwargs_from_checkpoint
 from minigpt.model.transformer import GPTConfig, MiniGPT
 from minigpt.train.trainer import Trainer
 
@@ -81,7 +81,9 @@ def main():
     model = MiniGPT(gpt)
     if base is not None:
         try:
-            model.load_state_dict(base["model_state"])
+            # 宽容加载：旧 checkpoint 里的 out_head.bias 会被忽略（新结构输出头无 bias），
+            # 其余架构不匹配仍然显式报错，避免"静默微调到错误权重"
+            load_state_into_model(model, base["model_state"], verbose=rank0)
         except RuntimeError as exc:
             raise SystemExit(
                 f"加载 {args.pretrain} 权重失败：{exc}\n"

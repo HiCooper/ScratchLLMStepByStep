@@ -12,7 +12,11 @@
 """
 import argparse
 import os
+import sys
 import time
+
+# 允许直接 `python scripts/validate_pretrain.py` 运行（与仓库内其他脚本一致）
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import torch
 from transformers import AutoTokenizer

@@ -96,41 +96,47 @@ GENERATORS = [gen_addition, gen_subtraction, gen_multiplication, gen_mixed,
 
 
 # ------------------------- easy profile（容量匹配：1~2 位数、答案短） -------------------------
+# easy 的题目空间由操作数上界决定：默认 1..9 时全部唯一题目只有约 1000 个，**不足以**
+# 切出与训练集不相交的评测集（实测 1064 个唯一题目全部出现在 60k 训练集里，所以
+# "easy CoT 90%→100%" 是记忆而非泛化）。需要做可信评测时用 --easy-max 放大空间。
+EASY_MAX = 9
+
+
 def gen_easy_add(rng):
-    a, b = rng.randint(1, 9), rng.randint(1, 9)
+    a, b = rng.randint(1, EASY_MAX), rng.randint(1, EASY_MAX)
     return _fmt(f"请计算 {a} + {b} 等于多少？",
                 [f"先看个位：{a} + {b}", f"相加得 {a + b}"], a + b)
 
 
 def gen_easy_sub(rng):
-    a, b = rng.randint(2, 9), rng.randint(1, 9)
+    a, b = rng.randint(2, EASY_MAX), rng.randint(1, EASY_MAX)
     a, b = max(a, b), min(a, b)
     return _fmt(f"请计算 {a} - {b} 等于多少？",
                 [f"被减数 {a}，减数 {b}", f"相减得 {a - b}"], a - b)
 
 
 def gen_easy_mul(rng):
-    a, b = rng.randint(2, 9), rng.randint(2, 9)
+    a, b = rng.randint(2, EASY_MAX), rng.randint(2, EASY_MAX)
     return _fmt(f"请计算 {a} × {b} 等于多少？",
                 [f"{a} 个 {b} 相加", f"{a} × {b} = {a * b}"], a * b)
 
 
 def gen_easy_div(rng):
-    b, q = rng.randint(2, 9), rng.randint(2, 9)
+    b, q = rng.randint(2, EASY_MAX), rng.randint(2, EASY_MAX)
     a = b * q
     return _fmt(f"请计算 {a} ÷ {b} 等于多少？",
                 [f"想 {b} 乘几等于 {a}", f"{b} × {q} = {a}，所以商是 {q}"], q)
 
 
 def gen_easy_two_step(rng):
-    a, b, c = rng.randint(1, 9), rng.randint(1, 9), rng.randint(1, 9)
+    a, b, c = rng.randint(1, EASY_MAX), rng.randint(1, EASY_MAX), rng.randint(1, EASY_MAX)
     return _fmt(f"请计算 {a} + {b} - {c} 等于多少？",
                 [f"先算加法：{a} + {b} = {a + b}", f"再算减法：{a + b} - {c} = {a + b - c}"],
                 a + b - c)
 
 
 def gen_easy_word(rng):
-    a, b = rng.randint(1, 9), rng.randint(1, 9)
+    a, b = rng.randint(1, EASY_MAX), rng.randint(1, EASY_MAX)
     return _fmt(f"小明有 {a} 支铅笔，又买了 {b} 支，一共有多少支铅笔？",
                 [f"原有的铅笔：{a} 支", f"又买了 {b} 支", f"一共 {a} + {b} = {a + b} 支"], a + b)
 
@@ -151,6 +157,51 @@ def build(n, seed, offset=0):
         gen = GENERATORS[(i + offset) % len(GENERATORS)]
         rows.append(gen(rng))
     return rows
+
+
+def generate_unique_pool(generators, seed, target, exclude=()):
+    """按题目文本去重地生成题目池，并排除 `exclude` 中的题目。
+
+    真实问题：旧实现"评测集换个 seed"来避免与训练集重合，但 easy profile 的
+    题目空间极小——个位数加减乘除的全部唯一题目只有约 1000 个，200 道评测题
+    100% 落在训练集里（实测 easy 训练集仅 1064 个唯一题目，评测集 200/200 命中）。
+    于是 README 的"easy CoT 90%→100%"测的是记忆，不是泛化。
+    这里改为先构造去重题目池，再切分，从根本上保证 train/eval 不相交。
+    """
+    rng = random.Random(seed)
+    seen = {q.strip() for q in exclude}
+    pool, attempts = [], 0
+    limit = max(2000, target * 300)
+    while len(pool) < target and attempts < limit:
+        q = generators[attempts % len(generators)](rng)
+        attempts += 1
+        key = q["instruction"]
+        if key in seen:
+            continue
+        seen.add(key)
+        pool.append(q)
+    rng.shuffle(pool)
+    return pool, len(seen)
+
+
+def build_disjoint(n_math, n_eval, seed, profile, exclude=()):
+    """返回 (train_math, eval_rows, unique_total)，保证评测题不出现在训练题中。"""
+    gens = EASY_GENERATORS if profile == "easy" else GENERATORS
+    pool, unique_total = generate_unique_pool(gens, seed, n_math + n_eval, exclude=exclude)
+    if len(pool) < n_math + n_eval:
+        print(f"[cot-data] 警告：{profile} profile 去重后只有 {len(pool)} 个可用题目"
+              f"（含排除项共 {unique_total}），少于请求的 {n_math + n_eval}。"
+              f"评测集将缩小以保证与训练集不相交。")
+    n_eval_eff = min(n_eval, max(1, len(pool) // 5), max(1, len(pool) - 1))
+    eval_rows = pool[:n_eval_eff]
+    rest = pool[n_eval_eff:]
+    if not rest:
+        raise SystemExit(f"[cot-data] {profile} 题目空间不足以切出不相交的评测集")
+    # 训练题不足时循环复制（只重复训练题，绝不引入评测题）
+    train_math = [rest[i % len(rest)] for i in range(n_math)] if n_math > 0 else []
+    print(f"[cot-data] profile={profile} 唯一题目={len(pool)} "
+          f"train={len(train_math)}(去重后 {len(rest)}) eval={len(eval_rows)}(与训练集不相交)")
+    return train_math, eval_rows, len(pool)
 
 
 def load_general(path, n, seed):
@@ -189,20 +240,57 @@ def main():
     ap.add_argument("--profile", choices=["hard", "easy"], default="hard",
                     help="hard=多位数/应用题（容量要求高）；easy=1~2 位数单步/两步（小模型可学）")
     ap.add_argument("--seed", type=int, default=1234)
+    ap.add_argument("--exclude-jsonl", action="append", default=[],
+                    help="构建评测集时排除这些文件里出现过的题面（可多次传入）。"
+                         "用于生成与**既有训练集**不相交的评测集，例如排除 "
+                         "dataset/sft/sft_cot_easy_60k.jsonl")
+    ap.add_argument("--easy-max", type=int, default=9,
+                    help="easy profile 的操作数上界（默认 9）。设大（如 20）可放大题目空间，"
+                         "从而切出与训练集真正不相交的评测集；改变它会使新旧 easy 结果不可比")
+    ap.add_argument("--eval-only", action="store_true",
+                    help="只生成评测集（不写训练集），配合 --exclude-jsonl 得到干净的留出集")
     args = ap.parse_args()
 
+    global EASY_MAX
+    EASY_MAX = int(args.easy_max)
+
+    exclude = []
+    for p in args.exclude_jsonl:
+        if not os.path.exists(p):
+            print(f"[cot-data] 警告：--exclude-jsonl {p} 不存在，忽略")
+            continue
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    exclude.append(json.loads(line).get("instruction", ""))
+    if exclude:
+        print(f"[cot-data] 从 {len(args.exclude_jsonl)} 个文件载入 {len(exclude)} 条待排除题面")
+
     n_general = int(args.n_train * args.mix_general)
-    builder = build_easy if args.profile == "easy" else build
-    math_rows = builder(args.n_train - n_general, seed=args.seed)
+    n_math = max(0, args.n_train - n_general)
+    math_rows, eval_rows, n_unique = build_disjoint(
+        n_math, args.n_eval, args.seed, args.profile, exclude=exclude)
+    write_jsonl(eval_rows, args.out_eval)
+    if args.eval_only:
+        print(f"[cot-data] eval-only：未写训练集（唯一题目池 {n_unique}）")
+        return
+
     general = load_general(args.general_jsonl, n_general, seed=args.seed + 1)
+    if n_general > 0 and not general:
+        # 真实隐患：通用语料缺失时旧实现静默返回 []，训练集只有数学题却毫无提示
+        print(f"[cot-data] 警告：--general-jsonl {args.general_jsonl} 不存在或为空，"
+              f"本次训练集将不含通用指令（丢失 {n_general} 条，可能加剧灾难性遗忘）")
     train = math_rows + general
     random.Random(args.seed).shuffle(train)
     write_jsonl(train, args.out_train)
 
-    # 评测集用不同 seed 与生成器偏移，避免与训练题目重合
-    gen_list = EASY_GENERATORS if args.profile == "easy" else GENERATORS
-    eval_rows = builder(args.n_eval, seed=args.seed + 99999, offset=len(gen_list) // 2)
-    write_jsonl(eval_rows, args.out_eval)
+    # 自检：评测题绝不能出现在训练集里
+    train_q = {r["instruction"] for r in train}
+    overlap = sum(1 for r in eval_rows if r["instruction"] in train_q)
+    if overlap:
+        raise SystemExit(f"[cot-data] 严重错误：评测集有 {overlap}/{len(eval_rows)} 条与训练集重合")
+    print(f"[cot-data] 自检通过：eval({len(eval_rows)}) 与 train({len(train)}) 题面零重合")
+
 
 
 if __name__ == "__main__":

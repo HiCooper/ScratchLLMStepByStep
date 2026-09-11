@@ -2,7 +2,7 @@
 # checkpoint 空间守护：每个目录只保留最近 KEEP 个 checkpoint-*.pth（final.pt 永不删），
 # 且只删除 mtime 早于 MIN_AGE 的文件（避免删掉正在写入的存档）。
 # 用法：setsid nohup bash scripts/checkpoint_janitor.sh [间隔秒=60] [保留个数=2] > /tmp/janitor.log 2>&1 &
-set -uo pipefail
+set -euo pipefail
 cd "$(dirname "$0")/.."
 INTERVAL="${1:-60}"
 KEEP="${2:-2}"

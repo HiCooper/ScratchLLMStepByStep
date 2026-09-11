@@ -105,7 +105,45 @@ Chinchilla 参考 = 10~20 × 参数量
 ## 8. 评测协议（可复现）
 
 ```bash
-python scripts/evaluate_pretrain.py --checkpoint <ckpt> --bin dataset/bins/pretrain_v3_full.bin --max-rows 512
+# 默认 --split val：与训练同一口径的验证集（均匀分块 + 双端对齐文档边界）
+# ⚠️ 不要用 --max-rows 取 .bin 最前面的窗口来评估参与过训练的 bin：那是训练集 loss，
+#    而且本语料按领域排序（头=中文创作、尾=英文选择题），头尾 ppl 实测可差 3 倍以上。
+python scripts/evaluate_pretrain.py --checkpoint <ckpt> --bin dataset/bins/pretrain_v3_full.bin --split val
 python scripts/eval_thinking.py --checkpoint <ckpt> --eval-jsonl dataset/sft/cot_eval_easy_zh.jsonl \
   --n 60 --strategies plain,single,two-phase --repetition-penalty 1.0
 ```
+
+
+## 评测协议（v2，2025-09 修订）
+
+| 口径 | 命令 | 用途 |
+|---|---|---|
+| **验证集（推荐）** | `evaluate_pretrain.py --split val` | 均匀分块 + 双端对齐文档边界，497 窗，与训练**文档级零重叠**；可比较泛化 |
+| 全量 bin | `--split all` | 只适合**未参与训练**的 bin（如纯领域留出 bin） |
+| 禁止 | `--split all --max-rows N` | 取的是 bin 最前面的窗口 = 训练集 loss；本语料按领域排序，头尾 ppl 可差 3 倍以上 |
+
+同一 checkpoint 的实测差异（`pretrain_v2_full`）：
+
+| 口径 | ppl |
+|---|---|
+| 头部 64 窗（旧 README 口径） | 23.40 |
+| 尾部 64 窗（全英文选择题） | 6.78 |
+| **全量 blocked val（497 窗）** | **15.82** |
+
+结论：绝对数值高度依赖"取哪些窗口"，只有固定 `--split val` 才可跨 checkpoint 比较；
+切分范围记录在每个 run 的 `metrics.json:data_split` 里，可复现。
+
+## 容量消融（isotoken）
+
+```bash
+DRY_RUN=1 bash scripts/run_capacity_ablation.sh     # 无 GPU 也能检查命令拼装
+setsid nohup env TAG=cap768 TOKENS=8.6e8 BS=16 ACCUM=1 \
+  bash scripts/run_capacity_ablation.sh > models/checkpoints/cap768.log 2>&1 &
+```
+
+- 512/10/8 (47.9M) 基线：`pretrain_v2_full`，8.6 亿 tokens / 211k 步
+- 768/12/12 (109.6M)：同 8.6 亿 tokens → 52,490 步 @ bs16×ctx1024（单卡 ≥16GB，bf16）
+- 显存不足时保持**有效 batch 不变**：`BS=4 ACCUM=4`
+- 判据：hard CoT 零重合留出集（`cot_eval_hard_disjoint.jsonl`）上的准确率是否显著提升
+
+> 本仓库开发环境无 GPU，该消融只完成代码/预设/数据侧准备，训练与评测**尚未执行**。

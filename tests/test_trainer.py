@@ -294,3 +294,17 @@ def test_grad_norm_matches_manual_computation(small_config):
     manual = sum(float(p.grad.detach().norm(2)) ** 2 for p in model.parameters()
                  if p.grad is not None) ** 0.5
     assert abs(fast - manual) < 1e-4, f"fast={fast} manual={manual}"
+
+
+def test_final_train_loss_not_zero_when_last_eval_at_end(tmp_path):
+    """回归：最后一次 eval 恰好落在终点时，metrics 里的 train_loss 不能记成 0。
+
+    真实问题：eval 触发会清零 loss 累加器，随后收尾再取一次全局均值就得到 0.0——
+    冒烟跑出来的 metrics.json 里 train_loss=0.0 正是这个原因。
+    """
+    tr = _build(tmp_path, {"eval_steps": 4, "max_steps": 4, "reset_step": True,
+                           "gradient_accumulation_steps": 2, "num_train_epochs": 1},
+                n=32)
+    tr.train()
+    tl = tr.final_metrics.get("train_loss")
+    assert tl is not None and tl > 0.5, f"train_loss={tl}（0 或过小说明取了空累加器）"

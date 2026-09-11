@@ -78,6 +78,10 @@ def collect(cp: str | None = None):
                                  "perplexity": m.get("perplexity"),
                                  "best_eval_loss": m.get("best_eval_loss"),
                                  "best_step": m.get("best_step"),
+                                 # 评估口径：不同切分/不同 bin 的 eval_loss 不可直接比较
+                                 "eval_split": (m.get("data_split") or {}).get("split"),
+                                 "eval_rows": (m.get("data_split") or {}).get("eval_rows"),
+                                 "eval_blocks": (m.get("data_split") or {}).get("n_blocks"),
                                  "params": estimate_params(cfg),
                                  "final": os.path.exists(os.path.join(os.path.dirname(path), "final.pt")),
                                  "best": os.path.exists(os.path.join(os.path.dirname(path), "best.pt"))})
@@ -121,6 +125,16 @@ def _best(r: dict) -> str:
     return f"{float(v):.4f}" if st is None else f"{float(v):.4f}@{st}"
 
 
+def _split_label(r) -> str:
+    """把 metrics.json 里记录的评估口径压缩成短标签（区分"训练集口径"与"留出集口径"）。"""
+    name = r.get("eval_split")
+    if not name:
+        return "—(旧产物)"
+    if name == "blocked-document-aligned":
+        return f"留出集/{r.get('eval_blocks') or '-'}块"
+    return str(name)
+
+
 def _num(v, nd: int = 4) -> str:
     """统一的数值格式化：None/非数值安全降级为 —。"""
     try:
@@ -132,15 +146,16 @@ def _num(v, nd: int = 4) -> str:
 def render(d: dict) -> str:
     L = [f"# MiniGPT 训练报告", "", f"生成时间：{d['time']}", ""]
     L += ["## 1. 预训练 run", "",
-          "> 注：各 run 的 eval_loss 来自各自的验证切分（语料/比例可能不同），趋势可比；"
-          "严格的同口径对比见 §2（同一 bin、同一 `--max-rows`）。",
+          "> 注：各 run 的 eval_loss 来自各自的验证切分（语料/比例/块数可能不同），**只有「评估口径」一致的 run 才可直接比较**；"
+          "严格的同口径对比见 §2（同一 bin、同一 `--split val`）。",
           "`best.pt` 是 eval_loss 历史最优时的权重（小模型后期易过拟合，做下游/评测通常优于 `final.pt`）。", "",
-          "| run | step | params | train_loss | eval_loss | perplexity | best_eval_loss@step | final.pt | best.pt |",
+          "| run | step | params | train_loss | eval_loss | perplexity | 评估口径 | best_eval_loss@step | final.pt | best.pt |",
           "|---|---|---|---|---|---|---|---|---|"]
     for r in d["pretrain"]:
         best = _best(r)
         L.append(f"| {r['run']} | {r['step']} | {r['params']} | "
                  f"{_num(r.get('train_loss'))} | **{_num(r.get('eval_loss'))}** | {_num(r.get('perplexity'), 2)} | "
+                 f"{_split_label(r)} | "
                  f"{best} | {'✅' if r['final'] else '—'} | {'✅' if r.get('best') else '—'} |")
     if not d["pretrain"]:
         L.append("| （暂无） | | | | | | | | |")

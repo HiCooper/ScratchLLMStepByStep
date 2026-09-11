@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "minigpt-scratch"
+version = "0.2.0"
+description = "从零手写并训练 MiniGPT：教学 notebook + 生产级训练工程"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "torch>=2.4.0",
+    "transformers>=4.42.0",
+    "tokenizers>=0.19.0",
+    "numpy>=1.24.0",
+    "tensorboard>=2.14.0",
+]
+
+[project.optional-dependencies]
+# notebook 06/10/15 绘图、notebook 12 分类微调
+notebook = ["matplotlib>=3.8.0", "pandas>=2.0.0"]
+dev = ["pytest>=7.0"]
+# 仅 CUDA sm_80+ 可用（RTX20/Turing 不支持 FA2），需匹配 CUDA 版本
+flash = ["flash-attn>=2.5.0"]
+
+[tool.setuptools]
+# 只打包代码包；notebooks/scripts/skills/tests 留在仓库里按脚本使用
+packages = ["minigpt", "minigpt.model", "minigpt.data", "minigpt.train"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+    "ignore::DeprecationWarning:pytz.*",
+]

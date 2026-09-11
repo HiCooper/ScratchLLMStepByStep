@@ -101,7 +101,7 @@ NPROC=4 bash scripts/pretrain_start.sh --paths_output_dir models/checkpoints/pre
 | `minigpt/train/{trainer,pretrainer,sft_trainer,metrics}.py` | 训练器（AMP/梯度累积/lr 调度/eval/save/resume/DDP/compile/num_workers）、入口、TensorBoard 指标 |
 | `scripts/build_pretrain_bin.py` | 语料 → `.bin`（`build` / `info`） |
 | `scripts/generate.py` | 推理 CLI（`--chat --thinking --thinking-strategy single`） |
-| `scripts/evaluate_pretrain.py` | loss / perplexity（`--max-rows` 控耗时） |
+| `scripts/evaluate_pretrain.py` | loss / perplexity（**默认 `--split val`** 走与训练同一口径的验证集） |
 | `scripts/eval_thinking.py` | 思考模式对比（plain/single/two-phase，`--repetition-penalty 1.0`） |
 | `scripts/build_cot_sft.py` | CoT 数据（`--profile easy|hard`，自带答案） |
 | `scripts/train_dashboard.py` | 看板（网页 8099 / `--once` / `--plot`；默认**自动跟随当前正在跑的 run**，含 SFT 阶段） |
@@ -172,8 +172,9 @@ python scripts/generate.py --checkpoint <ckpt> --tokenizer-dir models/tokenizer_
   --prompt "什么是AI？" --max-new-tokens 120 --do-sample --temperature 0.8 --top-k 50 --top-p 0.92 --repeat-penalty 1.2
 python scripts/generate.py --checkpoint <ckpt> --tokenizer-dir models/tokenizer_v3 --chat --thinking \
   --thinking-strategy single --prompt "请计算 27 ÷ 3 等于多少？" [--hide-thinking]
+# --split val = 训练时同一口径的验证集（均匀分块 + 双端对齐文档边界），可直接比较泛化
 python scripts/evaluate_pretrain.py --checkpoint <ckpt> --tokenizer-dir models/tokenizer_v3 \
-  --bin <bin> --max-rows 512 --output models/checkpoints/ppl.json
+  --bin <bin> --split val --output models/checkpoints/ppl.json
 python scripts/eval_thinking.py --checkpoint <ckpt> --eval-jsonl dataset/sft/cot_eval_easy_zh.jsonl \
   --n 60 --strategies plain,single,two-phase --repetition-penalty 1.0 --output models/checkpoints/eval_thinking.json
 ```

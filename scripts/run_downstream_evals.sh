@@ -15,6 +15,9 @@
 #   N         思考模式评测题量（默认 60，= 数据集内全部留出题）
 #
 # 用法：setsid nohup bash scripts/run_downstream_evals.sh > models/checkpoints/evals_${TAG}.log 2>&1 &
+# 说明：本脚本刻意**不加 `set -e`**——它的职责是长时间守护/自愈，很多命令（pgrep 无匹配返回 1、
+# 单次训练失败需要重试、清理失败需要忽略）本来就允许非零退出；加了 -e 会让守护进程本身
+# 被一次瞬时失败带走，反而更不安全。因此只用 `set -uo pipefail` 兜住未定义变量与管道错误。
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -38,24 +41,32 @@ pick() {
   else echo ""; fi
 }
 
-log "=== 4a) 思考模式评测：easy（TAG=$TAG, N=$N）==="
+# 评测集选择：优先用与训练集**零重合**的 disjoint 留出集；旧的 cot_eval_easy_zh.jsonl
+# 实测 156/156 条全部出现在 60k 训练集里（easy 题目空间总共只有 1064 个唯一题目），
+# 用它测出来的是记忆而不是泛化。缺失 disjoint 文件时回退并告警。
+EVAL_EASY="dataset/sft/cot_eval_easy_disjoint.jsonl"
+[ -f "$EVAL_EASY" ] || { EVAL_EASY="dataset/sft/cot_eval_easy_zh.jsonl"; log "⚠️ 未找到 disjoint easy 留出集，回退到被污染的旧评测集（结果不可作为泛化证据）"; }
+EVAL_HARD="dataset/sft/cot_eval_hard_disjoint.jsonl"
+[ -f "$EVAL_HARD" ] || { EVAL_HARD="dataset/sft/cot_eval_zh.jsonl"; log "⚠️ 未找到 disjoint hard 留出集，回退到旧评测集（约 33% 与训练集重合）"; }
+
+log "=== 4a) 思考模式评测：easy（TAG=$TAG, N=$N, eval=$EVAL_EASY）==="
 CK=$(pick "$COT_EASY")
 if [ -n "$CK" ]; then
   log "使用权重：$CK"
   python3 -u scripts/eval_thinking.py --checkpoint "$CK" --tokenizer-dir "$TOK" \
-    --eval-jsonl dataset/sft/cot_eval_easy_zh.jsonl --n "$N" \
+    --eval-jsonl "$EVAL_EASY" --n "$N" \
     --strategies plain,single,two-phase --repetition-penalty 1.0 \
     --output "models/checkpoints/eval_${TAG}_cot_easy.json" || log "4a 失败（继续）"
 else
   log "跳过：$COT_EASY 下没有 best.pt / final.pt"
 fi
 
-log "=== 4b) 思考模式评测：hard（TAG=$TAG, N=$N）==="
+log "=== 4b) 思考模式评测：hard（TAG=$TAG, N=$N, eval=$EVAL_HARD）==="
 CK=$(pick "$COT_HARD")
 if [ -n "$CK" ]; then
   log "使用权重：$CK"
   python3 -u scripts/eval_thinking.py --checkpoint "$CK" --tokenizer-dir "$TOK" \
-    --eval-jsonl dataset/sft/cot_eval_zh.jsonl --n "$N" \
+    --eval-jsonl "$EVAL_HARD" --n "$N" \
     --strategies plain,single,two-phase --repetition-penalty 1.0 \
     --output "models/checkpoints/eval_${TAG}_cot_hard.json" || log "4b 失败（继续）"
 else

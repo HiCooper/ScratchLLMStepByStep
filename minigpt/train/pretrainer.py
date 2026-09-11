@@ -61,6 +61,8 @@ def main():
         tie_word_embeddings=mc.tie_word_embeddings,
         use_swiglu=mc.use_swiglu, use_checkpoint=mc.use_checkpoint,
         flash_attn=mc.flash_attn,
+        norm_type=mc.norm_type, ffn_hidden_dim=mc.ffn_hidden_dim,
+        lm_head_bias=mc.lm_head_bias, rope_theta=mc.rope_theta,
     )
     model = MiniGPT(gpt_cfg)
 

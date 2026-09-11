@@ -9,35 +9,80 @@ from minigpt.model.attention import MultiHeadAttention, FlashMultiHeadAttention
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 class LayerNorm(nn.Module):
-    def __init__(self, emb_dim):
+    """LayerNorm（保留 scale/shift 参数名，与历史 checkpoint 完全兼容）。
+
+    实现改为调用 `F.layer_norm`：融合内核比手写 mean/var 少物化 4~5 个中间张量，
+    且 CUDA 实现内部按 fp32 累加（手写版在 fp16 下会以 fp16 统计均值/方差）。
+    """
+
+    def __init__(self, emb_dim, eps=1e-5):
         super().__init__()
-        self.eps = 1e-5
+        self.eps = eps
         self.scale = nn.Parameter(torch.ones(emb_dim))
         self.shift = nn.Parameter(torch.zeros(emb_dim))
 
     def forward(self, x):
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, keepdim=True)
-        x_norm = (x - mean)/(torch.sqrt(var + self.eps))
-        return self.scale * x_norm + self.shift
+        return F.layer_norm(x, (x.shape[-1],), self.scale, self.shift, self.eps)
+
+
+class RMSNorm(nn.Module):
+    """RMSNorm（LLaMA/Qwen 主流）：省掉均值项与 shift，参数更少、少一个减均值的规约。
+
+    通过 `GPTConfig(norm_type="rmsnorm")` 启用。它与 LayerNorm 的 checkpoint 不兼容
+    （没有 `shift`），`checkpoint.py` 会按 `layernorm*/shift` 是否存在自动反推。
+    """
+
+    def __init__(self, emb_dim, eps=1e-5):
+        super().__init__()
+        self.eps = eps
+        self.scale = nn.Parameter(torch.ones(emb_dim))
+
+    def forward(self, x):
+        dtype = x.dtype
+        xf = x.float()
+        xf = xf * torch.rsqrt(xf.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+        return (self.scale * xf).to(dtype)
+
+
+def build_norm(norm_type: str, emb_dim: int):
+    if norm_type == "rmsnorm":
+        return RMSNorm(emb_dim)
+    if norm_type == "layernorm":
+        return LayerNorm(emb_dim)
+    raise ValueError(f"未知的 norm_type: {norm_type!r}（可选 layernorm | rmsnorm）")
+
+
+def _round_to_multiple(value: float, multiple: int = 64) -> int:
+    return max(multiple, int(round(value / multiple)) * multiple)
 
 
 class FeedForward(nn.Module):
-    def __init__(self, emb_dim:int, use_swiglu:bool=False):
+    def __init__(self, emb_dim:int, use_swiglu:bool=False, hidden_dim:int=0):
+        """前馈层。
+
+        `hidden_dim=0` 表示按经验公式自动取：
+          - GELU 版：4×emb_dim（GPT-2 传统）
+          - SwiGLU 版：8/3×emb_dim 对齐到 64 的倍数
+
+        真实问题：旧实现 SwiGLU 直接沿用 4×emb_dim，即 3 个 4d 矩阵，比 GELU 版
+        （2 个 4d 矩阵）多 50% 前馈参数——实测 512/10/8 总参数从 47.9M 涨到 58.4M
+        （+22%），与"门控换质量"的初衷相悖。LLaMA 正是把中间维压到 8/3·d 对齐参数量。
+        """
         super().__init__()
         self.use_swiglu = use_swiglu
+        self.hidden_dim = int(hidden_dim) or (
+            _round_to_multiple(8 * emb_dim / 3) if use_swiglu else 4 * emb_dim)
         if use_swiglu:
             # SwiGLU：gate 分支与 up 分支逐元素相乘，再 down 投影。
             # 现代 LLM(LLaMA/Mistral/Qwen)普遍采用；无 bias 与 qkv_bias=False 保持一致。
-            hidden_dim = 4 * emb_dim
-            self.gate_proj = nn.Linear(emb_dim, hidden_dim, bias=False)
-            self.up_proj = nn.Linear(emb_dim, hidden_dim, bias=False)
-            self.down_proj = nn.Linear(hidden_dim, emb_dim, bias=False)
+            self.gate_proj = nn.Linear(emb_dim, self.hidden_dim, bias=False)
+            self.up_proj = nn.Linear(emb_dim, self.hidden_dim, bias=False)
+            self.down_proj = nn.Linear(self.hidden_dim, emb_dim, bias=False)
         else:
             self.layers = nn.Sequential(
-                nn.Linear(emb_dim, 4 * emb_dim),
+                nn.Linear(emb_dim, self.hidden_dim),
                 nn.GELU(),
-                nn.Linear(4 * emb_dim, emb_dim),
+                nn.Linear(self.hidden_dim, emb_dim),
             )
 
     def forward(self, x):
@@ -61,11 +106,13 @@ class TransformerBlock(nn.Module):
             self.atten = FlashMultiHeadAttention(**attn_kwargs)
         else:
             self.atten = MultiHeadAttention(**attn_kwargs)
-        self.ffn = FeedForward(kwargs['emb_dim'], use_swiglu=kwargs.get('use_swiglu', False))
+        self.ffn = FeedForward(kwargs['emb_dim'], use_swiglu=kwargs.get('use_swiglu', False),
+                               hidden_dim=kwargs.get('ffn_hidden_dim', 0))
         self.use_checkpoint = kwargs.get('use_checkpoint', False)
         self.drop = nn.Dropout(kwargs['drop_rate'])
-        self.layernorm1 = LayerNorm(kwargs['emb_dim'])
-        self.layernorm2 = LayerNorm(kwargs['emb_dim'])
+        norm_type = kwargs.get('norm_type', 'layernorm')
+        self.layernorm1 = build_norm(norm_type, kwargs['emb_dim'])
+        self.layernorm2 = build_norm(norm_type, kwargs['emb_dim'])
 
     def forward(self, x, pos_cis, attention_mask=None, use_kv_cache=False, past_kv=None):
         shortcut = x
@@ -87,6 +134,7 @@ class TransformerBlock(nn.Module):
         return x, past_kv
 
 def precompute_pos_cis(dim: int, end: int, theta: float = 10000.0):
+    """RoPE 的复数旋转因子（与历史实现一致，theta 可配置以便长上下文外推）。"""
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=freqs.device)  # type: ignore
     freqs = torch.outer(t, freqs).float()  # type: ignore
@@ -165,6 +213,14 @@ class GPTConfig(PretrainedConfig):
         self.qkv_merged = kwargs.get('qkv_merged', False)
         self.tie_word_embeddings = kwargs.get('tie_word_embeddings', False)
         self.use_checkpoint = kwargs.get('use_checkpoint', False)
+        # 归一化类型：layernorm（默认，兼容历史 checkpoint）| rmsnorm
+        self.norm_type = kwargs.get('norm_type', 'layernorm')
+        # 前馈中间维：0 = 自动（GELU 4d / SwiGLU 8/3 d 对齐 64）
+        self.ffn_hidden_dim = kwargs.get('ffn_hidden_dim', 0)
+        # 输出头是否带 bias。共享权重时标准做法是不带（旧默认 True，多 32k 参数且非标准）
+        self.lm_head_bias = kwargs.get('lm_head_bias', False)
+        # RoPE 基频；默认 10000 与历史 checkpoint 一致
+        self.rope_theta = kwargs.get('rope_theta', 10000.0)
         super().__init__(**kwargs)
         self._validate()
 
@@ -180,6 +236,8 @@ class GPTConfig(PretrainedConfig):
         assert head_dim % 2 == 0, f"head_dim({head_dim}) 必须为偶数（RoPE 按相邻两维配对）"
         assert self.n_layers >= 1 and self.context_length >= 1 and self.vocab_size >= 1
         assert self.initializer_range > 0
+        assert self.norm_type in ('layernorm', 'rmsnorm'), f"未知 norm_type: {self.norm_type}"
+        assert self.rope_theta > 0
 
 
 class MiniGPT(PreTrainedModel):
@@ -203,10 +261,11 @@ class MiniGPT(PreTrainedModel):
             TransformerBlock(**(config.to_dict())) for _ in range(config.n_layers)
         ])
 
-        pos_cis = precompute_pos_cis(config.emb_dim // config.n_heads, config.context_length)
+        pos_cis = precompute_pos_cis(config.emb_dim // config.n_heads, config.context_length,
+                                     theta=config.rope_theta)
         self.register_buffer("pos_cis", pos_cis, persistent=False)
-        self.final_norm = LayerNorm(config.emb_dim)
-        self.out_head = nn.Linear(config.emb_dim, config.vocab_size)
+        self.final_norm = build_norm(config.norm_type, config.emb_dim)
+        self.out_head = nn.Linear(config.emb_dim, config.vocab_size, bias=config.lm_head_bias)
 
         # ---- 初始化 ----
         # 真实事故：这里以前没有任何初始化调用。transformers 5.x 的 PreTrainedModel.__init__
@@ -279,7 +338,8 @@ class MiniGPT(PreTrainedModel):
         # 注意：pos_cis 的最后一维是 head_dim/2，而 precompute_pos_cis 需要传完整 head_dim
         max_pos = position_ids.max().item()
         if max_pos >= self.pos_cis.shape[0]:
-            self.pos_cis = precompute_pos_cis(self.pos_cis.shape[1] * 2, max_pos + 1).to(self.pos_cis.device)
+            self.pos_cis = precompute_pos_cis(self.pos_cis.shape[1] * 2, max_pos + 1,
+                                              theta=self.config.rope_theta).to(self.pos_cis.device)
         pos_cis = self.pos_cis[position_ids]
 
         x = self.token_emb(inputs)

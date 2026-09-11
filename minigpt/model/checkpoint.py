@@ -27,11 +27,17 @@ OUT_HEAD_B = "out_head.bias"
 MASK_SUFFIX = ".atten.causal_mask"
 WQ_BIAS_SUFFIX = ".atten.Wq.bias"
 SWIGLU_SUFFIX = ".ffn.gate_proj.weight"
+GELU_FFN_SUFFIX = ".ffn.layers.0.weight"
+LN_SHIFT_SUFFIX = ".layernorm1.shift"
 _L0_RE = re.compile(r"^decode_layers\.(\d+)\.")
 
 # GPTConfig 中可以被 checkpoint config 直接覆盖的字段
 CONFIG_KEYS = ("emb_dim", "n_layers", "n_heads", "context_length", "drop_rate", "qkv_bias",
-               "flash_attn", "tie_word_embeddings", "use_swiglu", "qkv_merged", "use_checkpoint")
+               "flash_attn", "tie_word_embeddings", "use_swiglu", "qkv_merged", "use_checkpoint",
+               "norm_type", "ffn_hidden_dim", "lm_head_bias", "rope_theta")
+
+# 旧产物存在、新结构不再产生的键：属良性差异，加载时忽略而不是报错
+LEGACY_UNEXPECTED_KEYS = ("out_head.bias",)
 
 
 def _is_tied(state_dict: dict) -> bool:
@@ -74,10 +80,57 @@ def infer_model_kwargs(state_dict: dict) -> dict:
         "qkv_bias": any(k.endswith(WQ_BIAS_SUFFIX) for k in state_dict),
         "use_swiglu": any(k.endswith(SWIGLU_SUFFIX) for k in state_dict),
         "tie_word_embeddings": _is_tied(state_dict),
+        # LayerNorm 有 shift 参数、RMSNorm 没有，据此反推归一化类型
+        "norm_type": "layernorm" if any(k.endswith(LN_SHIFT_SUFFIX) for k in state_dict)
+                     else "rmsnorm",
+        # 输出头 bias 是否存在于权重里（新结构默认不带）
+        "lm_head_bias": OUT_HEAD_B in state_dict,
     }
+    # 前馈中间维可直接从权重形状读出（SwiGLU 看 gate_proj，GELU 看 layers.0）
+    for suffix in (SWIGLU_SUFFIX, GELU_FFN_SUFFIX):
+        hit = next((v for k, v in state_dict.items() if k.endswith(suffix)), None)
+        if hit is not None and getattr(hit, "ndim", 0) == 2:
+            kws["ffn_hidden_dim"] = int(hit.shape[0])
+            break
     if ctx:
         kws["context_length"] = ctx
     return kws
+
+
+def load_state_into_model(model, state_dict: dict, allow_missing=(), allow_unexpected=(),
+                          strict_critical: bool = True, verbose: bool = False):
+    """把 state_dict 载入模型，对**已知的良性差异**宽容，对其余差异显式报错。
+
+    使用场景：
+    - 旧 checkpoint（`out_head.bias` 还在）载入新结构（输出头无 bias）；
+    - 续训时模型新增/删除了个别 buffer。
+    但绝不放任真实的架构不匹配静默通过：缺失的关键权重一律报错。
+
+    返回 (missing, unexpected)。
+    """
+    allow_missing = set(allow_missing) | set(LEGACY_UNEXPECTED_KEYS)
+    allow_unexpected = set(allow_unexpected) | set(LEGACY_UNEXPECTED_KEYS)
+    filtered = {k: v for k, v in state_dict.items()
+                if k not in allow_unexpected or k in model.state_dict()}
+    try:
+        missing, unexpected = model.load_state_dict(filtered, strict=False)
+    except RuntimeError as exc:
+        # 形状不匹配（例如词表/层数/中间维不一致）——必须带上可读上下文而不是裸堆栈
+        raise RuntimeError(
+            f"权重形状不匹配，checkpoint 与当前结构不一致：{exc}") from exc
+    real_missing = [k for k in missing if k not in allow_missing and ".pos_cis" not in k]
+    real_unexpected = [k for k in unexpected if k not in allow_unexpected]
+    if verbose and (real_missing or real_unexpected):
+        print(f"[ckpt] 权重差异 missing={real_missing[:4]} unexpected={real_unexpected[:4]}")
+    if strict_critical and real_missing:
+        raise RuntimeError(
+            f"加载权重失败：缺少关键权重 {real_missing[:6]}"
+            f"{' ...' if len(real_missing) > 6 else ''}；checkpoint 与当前结构不匹配")
+    if real_unexpected:
+        raise RuntimeError(
+            f"加载权重失败：出现未知权重 {real_unexpected[:6]}"
+            f"{' ...' if len(real_unexpected) > 6 else ''}；checkpoint 与当前结构不匹配")
+    return missing, unexpected
 
 
 def model_kwargs_from_checkpoint(ck: dict, vocab_size: int | None = None) -> tuple[dict, bool]:
@@ -129,12 +182,14 @@ def build_model_from_checkpoint(path: str, tokenizer=None, device: str = "cpu",
         print(f"[ckpt] {path} 未携带 config，按权重形状推断结构：{kws}")
     gpt = GPTConfig(**kws)
     model = MiniGPT(gpt).to(device)
-    missing, unexpected = model.load_state_dict(ck["model_state"], strict=False)
-    critical = [k for k in missing if k not in ("out_head.weight",) and ".pos_cis" not in k]
-    if critical:
+    # 旧产物带 out_head.bias、新结构不带；良性键差异忽略，关键权重缺失仍报错
+    try:
+        load_state_into_model(model, ck["model_state"], allow_missing=("out_head.weight",),
+                              verbose=verbose)
+    except RuntimeError as exc:
         raise RuntimeError(
-            f"加载 {path} 失败：缺少关键权重 {critical[:6]}{' ...' if len(critical) > 6 else ''}；"
-            f"推断结构为 {kws}。请检查 checkpoint 与 tokenizer 是否匹配。"
-        )
+            f"加载 {path} 失败：{exc}\n推断结构为 {kws}。"
+            f"请检查 checkpoint 与 tokenizer 是否匹配。"
+        ) from exc
     model.eval()
     return model, ck, kws

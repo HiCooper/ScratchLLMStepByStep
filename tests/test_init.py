@@ -106,3 +106,89 @@ def test_config_has_initializer_range():
     """transformers 5.x 的 PretrainedConfig 不再自带 initializer_range。"""
     assert GPTConfig(vocab_size=100).initializer_range == 0.02
     assert GPTConfig(vocab_size=100, initializer_range=0.05).initializer_range == 0.05
+
+
+# ---------------------------------------------------------------------------
+# P2：架构开关（norm_type / ffn_hidden_dim / lm_head_bias / rope_theta）
+# ---------------------------------------------------------------------------
+def test_layernorm_matches_fused_reference():
+    """LayerNorm 改为 F.layer_norm 后必须与有偏方差的标准定义一致。
+
+    旧实现用 `x.var(dim=-1)`（**无偏**，除以 N-1），与标准 LayerNorm（除以 N）
+    相差约 (N/(N-1))^0.5；这是真实存在的数值偏差（虽因 LayerNorm 的尺度不变性
+    被后续线性层吸收，对已训练权重影响为 0.0000 nats）。
+    """
+    import torch.nn.functional as F
+    from minigpt.model.transformer import LayerNorm
+    torch.manual_seed(0)
+    ln = LayerNorm(32)
+    x = torch.randn(4, 32)
+    ref = F.layer_norm(x, (32,), ln.scale, ln.shift, ln.eps)
+    assert torch.allclose(ln(x), ref, atol=1e-6)
+    biased = ln.scale * ((x - x.mean(-1, keepdim=True))
+                         / torch.sqrt(x.var(-1, keepdim=True, unbiased=False) + ln.eps)) + ln.shift
+    assert torch.allclose(ln(x), biased, atol=1e-5)
+    unbiased = ln.scale * ((x - x.mean(-1, keepdim=True))
+                           / torch.sqrt(x.var(-1, keepdim=True, unbiased=True) + ln.eps)) + ln.shift
+    assert not torch.allclose(ln(x), unbiased, atol=1e-3), "应与旧的无偏方差实现存在差异"
+
+
+def test_rmsnorm_shape_and_params():
+    from minigpt.model.transformer import RMSNorm
+    torch.manual_seed(0)
+    rn = RMSNorm(32)
+    x = torch.randn(2, 4, 32)
+    y = rn(x)
+    assert y.shape == x.shape
+    assert not hasattr(rn, "shift"), "RMSNorm 不应有 shift 参数"
+    # RMS 归一化后每行均方 ≈ 1
+    assert torch.allclose(y.pow(2).mean(-1), torch.ones(2, 4), atol=0.1)
+
+
+def test_swiglu_hidden_dim_keeps_param_parity():
+    """SwiGLU 中间维必须压到 8/3·d，否则比 GELU 版多 50% 前馈参数。
+
+    只数参数量、不做前向，因此可以直接用生产尺寸 emb=512。
+    （小 emb 下 64 的对齐粒度会带来几个百分点的残差，属预期。）
+    """
+    def total(**kw):
+        m = MiniGPT(GPTConfig(vocab_size=1024, emb_dim=512, n_heads=8, n_layers=1,
+                              context_length=32, **kw))
+        return sum(p.numel() for p in m.parameters()), m
+
+    gelu, _ = total(tie_word_embeddings=True)
+    swiglu, m_sw = total(tie_word_embeddings=True, use_swiglu=True)
+    old_style, _ = total(tie_word_embeddings=True, use_swiglu=True,
+                         ffn_hidden_dim=4 * 512)
+    assert m_sw.decode_layers[0].ffn.hidden_dim == 1344, "8/3·512 应对齐到 64 的倍数"
+    assert abs(swiglu - gelu) / gelu < 0.02, \
+        f"SwiGLU({swiglu}) 与 GELU({gelu}) 参数量应基本一致（差 {abs(swiglu-gelu)/gelu:.1%}）"
+    assert old_style > swiglu * 1.2, "旧的 4d 实现应显著更大，确保该回归不会复现"
+
+
+def test_norm_type_switch():
+    gelu_ln = MiniGPT(_cfg())
+    from minigpt.model.transformer import LayerNorm, RMSNorm
+    assert isinstance(gelu_ln.decode_layers[0].layernorm1, LayerNorm)
+    rn = MiniGPT(_cfg(norm_type="rmsnorm"))
+    assert isinstance(rn.decode_layers[0].layernorm1, RMSNorm)
+    assert isinstance(rn.final_norm, RMSNorm)
+    with pytest.raises(AssertionError):
+        GPTConfig(vocab_size=10, norm_type="batchnorm")
+
+
+def test_lm_head_bias_default_off():
+    assert MiniGPT(_cfg()).out_head.bias is None
+    assert MiniGPT(_cfg(lm_head_bias=True)).out_head.bias is not None
+
+
+def test_rope_theta_is_configurable():
+    from minigpt.model.transformer import precompute_pos_cis
+    ctx = 8
+    a = precompute_pos_cis(8, ctx, theta=10000.0)
+    b = precompute_pos_cis(8, ctx, theta=500000.0)
+    assert not torch.allclose(a, b)
+    # 默认值必须保持 10000（与历史 checkpoint 一致）
+    m = MiniGPT(_cfg(context_length=ctx))
+    expect = precompute_pos_cis(m.config.emb_dim // m.config.n_heads, ctx, theta=10000.0)
+    assert torch.allclose(m.pos_cis, expect)

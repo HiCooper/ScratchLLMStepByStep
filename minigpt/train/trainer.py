@@ -12,6 +12,9 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, DistributedSampler, random_split
 from torch.distributed import init_process_group, destroy_process_group
 from minigpt.model.transformer import GPTConfig, MiniGPT
+from minigpt.train import checkpoint_io
+from minigpt.train.ddp_utils import ddp_kwargs, distributed_scalar_mean, unwrap_model, wrap_ddp
+from minigpt.train.schedule import LossAccumulator, get_dynamic_lr
 
 
 class Trainer:
@@ -46,10 +49,8 @@ class Trainer:
         self.step = 0
         self.cur_epoch = 0
         self.total_steps = 0
-        self.micro_loss_sum = 0.0   # 自上次 eval 以来各 micro-batch loss 之和
-        self.micro_count = 0        # 自上次 eval 以来的 micro-batch 数
-        self.last_train_loss = None      # 最近一次窗口的 train_loss（审计用）
-        self.last_train_loss_count = 0   # 该窗口实际参与的 micro-batch 数
+        # 训练 loss 记账（(sum,count) 口径，见 schedule.LossAccumulator）
+        self.loss_acc = LossAccumulator()
         self.last_grad_norm = 0.0
         self.ddp = False
         self.rank = -1
@@ -124,78 +125,25 @@ class Trainer:
         print(f'init train_loader steps: {len(self.train_loader)}, eval_loader: {len(self.eval_loader)}') if self.verbose else None
 
     def _unwrap(self):
-        """取出真实模型：兼容 DistributedDataParallel 与 torch.compile(OptimizedModule)。
-
-        真实事故：train() 里先 DDP 再 compile，于是嵌套顺序是
-        `OptimizedModule(DistributedDataParallel(MiniGPT))`。原来先判 `isinstance(DDP)`
-        对最外层 OptimizedModule 为 False，再取 `_orig_mod` 就拿到了 DDP 本身，保存出来的
-        state_dict 键全部带 `module.` 前缀（实测 `module.token_emb.weight`）——multi-GPU
-        （预设里 torch_compile=True）产出的 checkpoint 会被 checkpoint.py 判成"缺少关键
-        权重"而无法加载、也无法续训。因此必须先剥 compile 外壳，再剥 DDP。
-        """
-        model = getattr(self.model, "_orig_mod", self.model)   # 先剥 torch.compile 外壳
-        return model.module if isinstance(model, DistributedDataParallel) else model
+        """取出真实模型（委托给 ddp_utils.unwrap_model，顺序敏感，见其文档）。"""
+        return unwrap_model(self.model)
 
     def _save_model(self, checkpoint_path, epoch):
-        model, optimizer, step = self.model, self.optimizer, self.step
-        os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
-        local_model = self._unwrap()
-        payload = {
-            "model_state": local_model.state_dict(),
-            "optimizer_state": optimizer.state_dict(),
-            "epoch": epoch,
-            "step": step,
-            "best_eval_loss": self.best_eval_loss,
-            "best_step": self.best_step,
-            "scaler_state": self.scaler.state_dict() if self.scaler is not None else None,
-            "rng_state": {
-                "torch": torch.get_rng_state(),
-                "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
-                "numpy": np.random.get_state(),
-                "random": _random.getstate(),
-            },
-        }
-        if self.extra_ckpt is not None:
-            payload["config"] = self.extra_ckpt
-        torch.save(payload, checkpoint_path)
+        checkpoint_io.save_training_checkpoint(
+            checkpoint_path, self.model, self.optimizer, epoch=epoch, step=self.step,
+            best_eval_loss=self.best_eval_loss, best_step=self.best_step,
+            scaler=self.scaler, config=self.extra_ckpt)
 
     def _load_from_checkpoint(self):
-        # 在分布式训练的多GPU环境中，map_location可以确保模型的参数和优化器的状态被加载到正确的GPU上，避免出现设备不匹配而报错。
-        model, optimizer, device = self.model, self.optimizer, self.device
-        local_model = self._unwrap()
-        checkpoint = torch.load(self.last_checkpoint_path, map_location=device, weights_only=False)
-        local_model.load_state_dict(checkpoint['model_state'])
-        if optimizer != None:
-            optimizer.load_state_dict(checkpoint['optimizer_state'])
+        info = checkpoint_io.load_training_checkpoint(
+            self.last_checkpoint_path, self.model, self.optimizer, self.scaler,
+            device=self.device, verbose=self.verbose)
+        self.step = info["step"]
+        if info["best_eval_loss"] is not None:
+            self.best_eval_loss = info["best_eval_loss"]
+            self.best_step = info["best_step"]
+        return info["epoch"]
 
-        self.step = checkpoint.get('step', 0)
-        last_epoch = checkpoint.get('epoch', 0)
-        # 续训时恢复"历史最优"记录，避免 best.pt 覆盖后指标从 inf 重新起算
-        if checkpoint.get("best_eval_loss") is not None:
-            self.best_eval_loss = float(checkpoint["best_eval_loss"])
-            self.best_step = checkpoint.get("best_step")
-        # 恢复混合精度缩放器与随机数状态，保证续训可复现
-        if self.scaler is not None and checkpoint.get("scaler_state") is not None:
-            self.scaler.load_state_dict(checkpoint["scaler_state"])
-        rng = checkpoint.get("rng_state")
-        if rng is not None:
-            # 注意：torch.load(map_location=device) 会把 RNG 的 ByteTensor 也搬到 GPU，
-            # 而 set_rng_state 要求 CPU ByteTensor，这里统一 .cpu() 修正
-            torch_state = rng["torch"]
-            if torch.is_tensor(torch_state):
-                torch_state = torch_state.cpu()
-            torch.set_rng_state(torch_state)
-            if rng.get("cuda") and torch.cuda.is_available():
-                cuda_states = [st.cpu() if torch.is_tensor(st) else st for st in rng["cuda"]]
-                torch.cuda.set_rng_state_all(cuda_states)
-            if rng.get("numpy") is not None:
-                np.random.set_state(rng["numpy"])
-            if rng.get("random") is not None:
-                import random as _r
-                _r.setstate(tuple(rng["random"]))
-        print(f"load from checkpoint: {self.last_checkpoint_path}, last_epoch:{last_epoch}, last_step: {self.step}")
-        return last_epoch
-    
     def _init_distributed_mode(self):
         rank = int(os.environ.get("RANK", -1))
         if rank == -1: 
@@ -222,32 +170,13 @@ class Trainer:
 
     @staticmethod
     def _ddp_kwargs(local_rank=None):
-        """DDP 构造参数：关闭每 forward 的 buffer 广播。
-
-        模型 buffer 全是常量（每层 causal_mask 512×512×4B，10 层合计 10.5MB），
-        DDP 默认每个 forward 都广播一遍，纯属浪费带宽外加一次集合通信同步。
-        torch 2.13 起 `broadcast_buffers` 已废弃，优先用 `forward_sync_buffers`。
-        """
-        import inspect as _inspect
-        kwargs = {}
-        if local_rank is not None:
-            kwargs["device_ids"] = [local_rank]
-        if "forward_sync_buffers" in _inspect.signature(
-                DistributedDataParallel.__init__).parameters:
-            kwargs["forward_sync_buffers"] = False
-        else:
-            kwargs["broadcast_buffers"] = False
-        return kwargs
+        """DDP 构造参数（委托给 ddp_utils，便于单测）。"""
+        return ddp_kwargs(local_rank)
 
     @staticmethod
     def _wrap_model_with_ddp(model, local_rank):
-        # 位置编码用的是复数，而nccl不支持复数形式，此变量并不要求在多进程中保持一致，所以暂时屏蔽对此变量的同步
-        model._ddp_params_and_buffers_to_ignore = {"pos_cis"}
-        kwargs = Trainer._ddp_kwargs(local_rank)
-        model = DistributedDataParallel(model, **kwargs)
-        print(f"packaged model with DDP in cuda:{local_rank} ({kwargs})")
-        return model
-    
+        return wrap_ddp(model, local_rank)
+
     def _init_grad_scaler(self):
         # bfloat16 指数位与 fp32 相同、数值范围一致，无需 loss scaling；仅 float16 需要 GradScaler
         if self.use_mixed_precision and self.amp_dtype == torch.float16:
@@ -269,29 +198,37 @@ class Trainer:
         norms = torch._foreach_norm(grads, 2)
         return float(torch.linalg.vector_norm(torch.stack(norms)))
 
+    # ---- loss 记账（对外暴露的属性名保持稳定，便于测试与看板读取）----
+    @property
+    def micro_loss_sum(self):
+        return self.loss_acc.total
+
+    @property
+    def micro_count(self):
+        return self.loss_acc.count
+
+    @property
+    def last_train_loss(self):
+        return self.loss_acc.last_mean
+
+    @property
+    def last_train_loss_count(self):
+        return self.loss_acc.last_count
+
     def _accumulate_training_loss(self, loss):
         """累计一个 micro-batch 的 loss（本地累加，跨 rank 平均推迟到需要时）。
 
-        记账用 (sum, count) 而不是"除以 eval_steps×accum"：后者在最后一个不完整的
-        eval 窗口、以及 batch 数不能被 accumulation 整除时会系统性偏小
-        （实测残窗 train_loss=1.418，真值约 2.85）。
-
         旧实现每个 micro-batch 都做一次 `dist.reduce`（还直接原地写在带梯度的张量上），
-        即每一步一次集合通信同步点；本方法现在只做本地累加，跨卡平均由
-        `_global_mean_loss()` 在 eval/结束时一次性完成。
+        即每步一个集合通信同步点；现在只本地累加，跨卡平均由 `_global_mean_loss()`
+        在 eval/结束时一次性完成。
         """
-        self.micro_loss_sum += float(loss.detach())
-        self.micro_count += 1
+        self.loss_acc.add(loss)
 
     def _global_mean_loss(self):
         """跨 rank 的 micro-batch 平均 loss（**所有 rank 都必须调用**，内部含集合通信）。"""
-        if not self.ddp:
-            return self.micro_loss_sum / max(1, self.micro_count)
-        t = torch.tensor([self.micro_loss_sum, float(self.micro_count)],
-                         dtype=torch.float64, device=self.device)
-        dist.all_reduce(t, op=dist.ReduceOp.SUM)
-        return float(t[0] / max(1.0, float(t[1])))
-    
+        return distributed_scalar_mean(self.loss_acc.total, self.loss_acc.count,
+                                      self.device, self.ddp)
+
     def _record_metrics(self, train_loss, eval_loss, grad_norm, lr):
         # 展示用总步数用 effective_max：领域增量续训时 epochs*每epoch步数 会远大于实际目标
         print(f"{self.cur_time()} lr={lr:.5f}, train_loss: {train_loss:.4f}, "
@@ -316,26 +253,8 @@ class Trainer:
 
     @staticmethod
     def _get_dynamic_lr(target_lr, cur_step, warmup_steps, decay_steps):
-        """线性 warmup + 余弦退火。`cur_step` 是**即将执行的更新序号（1-based）**。
-
-        真实事故：调用方以前传"已完成的更新数"，于是第一次更新时 cur_step=0 →
-        warmup 分支算出 lr=0 → `_adjust_lr` 走 `if lr <= 0: return target_lr` 直接返回，
-        **没有写回 param_group**，优化器保持初始 lr（=峰值）：warmup 首步被整段跳过，
-        fp16 下很容易打出 loss 尖峰。另外 `warmup_steps == decay_steps` 时
-        `(cur-warmup)/(decay-warmup)` 会 ZeroDivisionError。
-        """
-        min_lr = target_lr / 10
-        warmup_steps = max(0, int(warmup_steps))
-        decay_steps = max(1, int(decay_steps))
-        if warmup_steps > 0 and cur_step <= warmup_steps:
-            return target_lr * (cur_step / warmup_steps)
-        if cur_step >= decay_steps:
-            return min_lr
-        # progress 以 cur_step-1 为基准：warmup_steps=0 时第一次更新恰好等于 target_lr
-        progress = (cur_step - 1 - warmup_steps) / max(1, decay_steps - 1 - warmup_steps)
-        progress = min(1.0, max(0.0, progress))
-        cos_scope = 0.5 * (1 + math.cos(math.pi * progress))
-        return min_lr + (target_lr - min_lr) * cos_scope
+        """委托给 schedule.get_dynamic_lr（纯函数，单测见 tests/test_schedule.py）。"""
+        return get_dynamic_lr(target_lr, cur_step, warmup_steps, decay_steps)
 
     def _adjust_lr(self):
         """按"即将执行的第 self.step+1 次更新"设置 LR 并返回。
@@ -345,11 +264,10 @@ class Trainer:
         数量级，余弦永远走不完，末端 LR 停在接近峰值处。
         """
         horizon = self.effective_max or self.total_steps
-        lr = self._get_dynamic_lr(self.target_lr, self.step + 1, self.warmup_steps, horizon)
+        lr = get_dynamic_lr(self.target_lr, self.step + 1, self.warmup_steps, horizon)
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = lr
         return lr
-
 
     def _check_and_evaluate(self, lr):
         # self.step 是在调用本方法**之前**自增的，所以这里直接按已完成步数取模。
@@ -360,9 +278,7 @@ class Trainer:
 
         # 所有 rank 都要参与 loss 的 all_reduce；只有 rank0 真正跑 eval
         train_loss = self._global_mean_loss()
-        self.last_train_loss = train_loss
-        self.last_train_loss_count = self.micro_count
-        self._reset_loss_acc()
+        self.loss_acc.snapshot_and_reset()
         if self.is_main_process:
             eval_loss = self._evaluate()
             grad_norm = self.last_grad_norm
@@ -371,8 +287,8 @@ class Trainer:
         dist.barrier() if self.ddp else None
 
     def _reset_loss_acc(self):
-        self.micro_loss_sum = 0.0
-        self.micro_count = 0
+        self.loss_acc.total = 0.0
+        self.loss_acc.count = 0
 
     def _evaluate(self):
         # 这里不能多进程同步，必须用原始Model
@@ -555,7 +471,13 @@ class Trainer:
             self._train_epoch(epoch)
 
         # 结束：先在所有 rank 上完成 loss 的集合通信，主进程再做最终评估与落盘
-        final_train_loss = self._global_mean_loss() if self.step > 0 else None
+        if self.step <= 0:
+            final_train_loss = None
+        elif self.loss_acc.count > 0:
+            final_train_loss = self._global_mean_loss()
+        else:
+            # 最后一个 eval 窗口恰好落在终点：累加器已被清零，用该窗口的快照值
+            final_train_loss = self.loss_acc.last_mean
         if self.is_main_process:
             final_eval = None
             if self.step > 0:

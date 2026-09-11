@@ -42,6 +42,10 @@ class ModelConfig:
     tie_word_embeddings: bool = True   # 大词表下输入/输出嵌入共享
     use_swiglu: bool = False
     use_checkpoint: bool = False
+    norm_type: str = "layernorm"       # layernorm（兼容历史 ckpt）| rmsnorm
+    ffn_hidden_dim: int = 0            # 0=自动（GELU 4d / SwiGLU 8/3·d 对齐 64）
+    lm_head_bias: bool = False         # 共享嵌入时标准做法是不带 bias
+    rope_theta: float = 10000.0        # RoPE 基频
 
 
 @dataclass

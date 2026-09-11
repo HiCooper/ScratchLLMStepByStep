@@ -1,7 +1,7 @@
 # AGENTS.md — 给自动化 agent 的仓库入口
 
 本仓库是「从零手写并训练 MiniGPT」的教程 + 生产级训练工程。**你要训练/微调/评测 MiniGPT，先读这个文件**，
-再按 `skills/minigpt-train/SKILL.md` 执行（DSH 会扫描 `skills/`、`.dsh/skills/`、`.agents/skills/`）。
+再按 `skills/minigpt-train/SKILL.md` 执行（DSH 扫描 `skills/`、`.dsh/skills/`、`.agents/skills/`；本仓库使用 `skills/`，不要写成 `.skills/`，否则 skill 不会被加载）。
 
 ## 最短路径（无需人工执行脚本）
 
@@ -35,12 +35,12 @@ CPU 环境下 agent 的正确做法：跑 `--smoke`/`--full --preset cpu --hours
 
 ## 训练相关事实（决策前必读）
 
-- 默认配置：**32k 词表（`models/tokenizer_v3`）+ 512/10/8 + ctx512 + fp16 + `torch.compile`** ≈ 22–30k tok/s（RTX2060 6GB 实测）。
+- 默认配置：`minigpt/config.py` 的默认值 = **32k 词表（`models/tokenizer_v3`）+ 512/10/8 + ctx512 + fp16 + 嵌入共享**；`torch.compile` 由预设/脚本显式开启（`--train_torch_compile True`），实测 ≈ 22–30k tok/s（RTX2060 6GB）。
 - 切换词表只改 `--data_tokenizer_dir`；**词表 >65535 时 `.bin` 必须 uint32**（`build_pretrain_bin.py` 自动处理并写 `.meta.json`）。
 - 语料：`dataset/pretrain_t2t_mini.jsonl`（127 万行）→ `dataset/bins/pretrain_v3_full.bin`（2.475 亿 tokens）。
 - 训练入口：`python3 -m minigpt.train.pretrainer`（预训练）/ `python3 -m minigpt.train.sft_trainer`（SFT）；
   SFT/CoT 数据生成：`scripts/build_cot_sft.py --profile easy|hard`。
-- 评测：`scripts/evaluate_pretrain.py`（loss/perplexity，注意 `--max-rows`）、`scripts/eval_thinking.py`（思考模式，`--repetition-penalty 1.0`）。
+- 评测：`scripts/evaluate_pretrain.py`（loss/perplexity，**默认 `--split val`** 走与训练同一口径的验证集；`--split all --max-rows N` 只在确认该 bin 未参与训练时才可用）、`scripts/eval_thinking.py`（思考模式，`--repetition-penalty 1.0`）。
 - 推理：`scripts/generate.py --chat [--thinking --thinking-strategy single]`。
 - 领域语料（parquet，如 `dataset/IndustryCorpus2_*`）：`scripts/parquet_to_jsonl.py` 转换（可混入通用语料防遗忘）→ 建 bin → 增量续训；**不要**把预训练语料直接拿去做 SFT（见 SKILL.md §7.5）。
 

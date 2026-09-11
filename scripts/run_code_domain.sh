@@ -10,6 +10,9 @@
 #
 # 用法（后台）：
 #   setsid nohup bash scripts/run_code_domain.sh > models/checkpoints/domain_pipeline.log 2>&1 < /dev/null &
+# 说明：本脚本刻意**不加 `set -e`**——它的职责是长时间守护/自愈，很多命令（pgrep 无匹配返回 1、
+# 单次训练失败需要重试、清理失败需要忽略）本来就允许非零退出；加了 -e 会让守护进程本身
+# 被一次瞬时失败带走，反而更不安全。因此只用 `set -uo pipefail` 兜住未定义变量与管道错误。
 set -uo pipefail
 cd "$(dirname "$0")/.."
 

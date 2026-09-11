@@ -73,7 +73,9 @@ bash scripts/download_data.sh
 
 ## 💥 模型规模与资源估算
 
-训练前可用下面两张表粗略评估资源需求（默认架构：GELU 前馈 + 独立 QKV + 不共享输出头，vocab=32000）。
+训练前可用下面两张表粗略评估资源需求（默认架构：GELU 前馈 + 独立 QKV + **共享输入/输出嵌入**，vocab=32000。
+注意：`config.py` 的 `ModelConfig.tie_word_embeddings` 默认 **True**，因此默认参数量比"不共享输出头"少 `vocab×emb_dim`；
+下表按**不共享**口径给出，便于与历史数据对照）。
 
 **参数量估算公式**：
 
@@ -111,44 +113,76 @@ bash scripts/download_data.sh
 
 ```
 ├── notebooks/                 # 15 个课程 notebook，01_~15_ 前缀按课程顺序排序
-├── minigpt/                   # 可复用代码包，notebook 通过 %run minigpt/... 引用
-│   ├── config.py              # 集中管理超参与路径（运行前改这里）
+├── minigpt/                   # 可复用代码包（pip install -e . 或设置 PYTHONPATH=. 后 import）
+│   ├── config.py              # 集中管理超参与路径（RunConfig：model/data/train/paths 四段）
 │   ├── model/
-│   │   ├── attention.py       # 自注意力/多头注意力/FlashAttention/RoPE
-│   │   └── transformer.py     # LayerNorm/FFN/TransformerBlock/GPTConfig/MiniGPT
+│   │   ├── attention.py       # 自注意力/多头注意力/FlashAttention/RoPE（KV cache 的因果判据）
+│   │   ├── transformer.py     # LayerNorm/FFN/TransformerBlock/GPTConfig/MiniGPT（含 _init_weights）
+│   │   ├── checkpoint.py      # 从 checkpoint 重建模型：config 优先，缺失则按权重形状反推
+│   │   └── generation.py      # 停止串/思考模式（两阶段 CoT）生成工具
 │   ├── data/
-│   │   ├── pretrain_dataset.py # 预训练二进制数据集(np.memmap)
-│   │   └── sft_dataset.py     # SFT 指令数据集/损失掩码
+│   │   ├── pretrain_dataset.py # 二进制语料(np.memmap/uint16-uint32) + 分块验证集切分 + 词表校验
+│   │   └── sft_dataset.py     # SFT 指令数据集/逐轮 assistant 掩码/停止符解析
 │   └── train/
-│       ├── trainer.py         # 训练器(单卡/DDP、混合精度、梯度累积)
-│       ├── pretrainer.py      # 预训练入口(DDP)
-│       └── pretrainer_single.py # 单卡教学版训练器
-├── scripts/                   # 下载数据 / 训练分词器 / 验证 / 环境检查 / 启动
+│       ├── trainer.py         # 训练器(单卡/DDP、AMP、梯度累积、LR 调度、ckpt、指标钩子)
+│       ├── pretrainer.py      # 预训练入口（生产，支持 DDP）
+│       ├── sft_trainer.py     # SFT/指令微调入口
+│       ├── pretrainer_single.py # 单卡教学版训练器（notebook 09/10 使用）
+│       └── metrics.py         # TensorBoard 面板（标量/直方图/图像/投影/样本）
+├── scripts/                   # 数据 / 训练 / 评测 / 监控
 │   ├── download_data.sh       # 从 ModelScope 下载 pretrain_t2t_mini.jsonl
 │   ├── train_tokenizer.py     # 训练 BPE 分词器（对应 notebook 01，支持 --max-lines 子集）
-│   ├── validate_pretrain.py   # 单卡端到端预训练验证（对应 notebook 09/10）
-│   ├── validate_ddp.py        # DDP 链路验证（nproc=1 单卡可跑，nproc=2 需真多卡）
+│   ├── parquet_to_jsonl.py    # 领域 parquet 语料转 jsonl（可混入通用语料防遗忘）
+│   ├── build_pretrain_bin.py  # jsonl -> .bin + .meta.json（词表 >65535 自动 uint32）
+│   ├── build_cot_sft.py       # 生成 SFT / CoT 训练集与评测集（--profile easy|hard）
+│   ├── evaluate_pretrain.py   # loss/perplexity（--split val 走与训练同一口径的验证集）
+│   ├── eval_thinking.py       # 思考模式评测（plain/single/two-phase）
+│   ├── generate.py            # 推理入口（--chat / --thinking）
+│   ├── train_dashboard.py     # 训练看板（--once 终端 / --serve 浏览器）
+│   ├── report_training.py     # 汇总 metrics.json 生成 TRAINING_REPORT.md
 │   ├── check_env.py           # 打印环境信息(Python/PyTorch/CUDA/GPU/CPU/包版本)
 │   ├── estimate_resources.py  # 估算参数量/显存/起步 GPU/训练时长
+│   ├── validate_pretrain.py   # 单卡端到端预训练验证（对应 notebook 09/10）
+│   ├── validate_ddp.py        # DDP 链路验证（nproc=1 单卡可跑，nproc=2 需真多卡）
+│   ├── train_pretrain_resilient.sh # 崩溃自动续训的长训守护（推荐入口）
+│   ├── checkpoint_janitor.sh  # checkpoint 空间守护（每目录保留最近 N 个）
+│   ├── run_downstream.sh / run_downstream_evals.sh # SFT + 下游评测流水线
 │   └── pretrain_start.sh      # torchrun DDP 多卡启动
-├── tests/                     # 单元测试(pytest，CPU 即可运行)
-│   ├── conftest.py            # 共享 fixture(小模型/迷你分词器)
+├── skills/minigpt-train/      # agent skill：SKILL.md + preflight/pipeline 一键脚本 + 参考文档
+├── tests/                     # 单元测试(pytest，CPU 即可运行，不需要数据与 GPU)
+│   ├── conftest.py            # 共享 fixture(小模型/迷你分词器) + sys.path 注入
 │   ├── test_attention.py      # 因果掩码/RoPE/padding 掩码/flash-attn 一致性
-│   ├── test_transformer.py    # GPTConfig/MiniGPT 前向/pos_cis 扩展/生成
-│   ├── test_data.py           # texts_to_bin/二进制数据集/数据集划分
-│   ├── test_trainer.py        # 梯度范数/梯度累积
-│   └── test_tokenizer.py      # 分词器编解码 round-trip/特殊 token
+│   ├── test_transformer.py    # 前向/pos_cis 扩展/生成 + KV-cache 与全量前向等价性
+│   ├── test_init.py           # 权重初始化（embedding std/残差缩放/初始 loss）
+│   ├── test_ddp_unwrap.py     # DDP+torch.compile 解包与 checkpoint 键名
+│   ├── test_sft_masking.py    # 逐轮 assistant 掩码/padding/停止符
+│   ├── test_data_bin.py       # .bin 往返/memmap/分块切分/词表校验
+│   ├── test_trainer.py        # 梯度范数/累积/LR 调度/eval 触发/loss 记账
+│   └── test_config.py         # CLI 覆盖/布尔解析/config.json 往返/默认值一致性
 └── img/                       # 图片素材
 ```
 
+> ⚠️ **评测口径**：`scripts/evaluate_pretrain.py` 默认 `--split val`，即在 `.bin` 上按「均匀分块 + 双端对齐文档边界」切出的验证集（与训练时 `split_train_eval_blocks` 同一口径，见 `metrics.json:data_split`）。
+> 不要用 `--split all --max-rows N` 去评估**参与过训练**的 bin：那取的是文件最前面的窗口，得到的其实是训练集 loss，且本语料按领域排序、头尾分布差异极大（实测同一 checkpoint 头/尾 ppl 可差 3 倍以上），不同 `--max-rows` 之间也不可比。
+
 > 涉及 `minigpt` 包的 notebook 开头都有一个「设置」单元格，会自动切到项目根目录，
 > 因此无论从哪个目录启动 Jupyter，`%run minigpt/...` 都能正常找到代码。
+>
+> 生产脚本建议 `pip install -e .`（见 `pyproject.toml`）；不安装时在仓库根目录加 `PYTHONPATH=.` 亦可。
 
 ## 💥 工程化说明
 
-正式训练脚本的超参与路径已统一收敛到 [`minigpt/config.py`](./minigpt/config.py)，运行前只需改这一处即可，无需再逐个脚本/notebook 找硬编码地址。
+正式训练脚本的超参与路径已统一收敛到 [`minigpt/config.py`](./minigpt/config.py)，`config.py` 的默认值即文档所述的生产基线（**512/10/8 + ctx512 + `tokenizer_v3`(32k) + fp16 + 嵌入共享**）：
 
-模型与训练器都支持一些**前沿开关**（在 `GPTConfig` / `train_args` 中，默认关闭以兼容旧 checkpoint，开启即为前沿配置）：
+```bash
+pip install -e .            # 或 PYTHONPATH=. python -m minigpt.train.pretrainer ...
+python3 -m minigpt.train.pretrainer --paths_output_dir models/checkpoints/xxx --train_max_steps 200000
+```
+
+CLI 覆盖使用扁平前缀（`--model_emb_dim` / `--data_tokenized_bin` / `--train_batch_size` / `--paths_output_dir`），布尔参数写成 `--train_torch_compile True|False`（**必须带值**，`false/0/no/off` 均可解析）；
+也可以 `--config-file <dump 出的 config.json>` 读回整份配置，CLI 优先级更高。
+
+模型与训练器都支持一些**前沿开关**（在 `GPTConfig` / `train_args` 中；`tie_word_embeddings` 与 `qkv_merged` 见下，其余默认关闭以兼容旧 checkpoint，开启即为前沿配置）：
 
 | 开关 | 位置 | 说明 |
 |---|---|---|
@@ -237,8 +271,9 @@ python scripts/generate.py --checkpoint models/checkpoints/pretrain_qwen_v1/fina
 
 ### 评估与测试
 ```bash
-python scripts/evaluate_pretrain.py --checkpoint models/checkpoints/pretrain_qwen_v1/final.pt \
-    --tokenizer-dir models/tokenizer_qwen2 --bin dataset/bins/pretrain_qwen.bin --max-rows 2000
+# --split val：与训练同一口径的验证集（均匀分块 + 双端对齐文档边界）
+python scripts/evaluate_pretrain.py --checkpoint models/checkpoints/pretrain_v2_full/final.pt \
+    --tokenizer-dir models/tokenizer_v3 --bin dataset/bins/pretrain_v3_full.bin --split val
 pytest tests/ -q        # 数据管线 / 采样 / config / 模型 / trainer 单元测试
 ```
 
@@ -289,22 +324,69 @@ setsid nohup bash scripts/run_code_domain.sh > models/checkpoints/domain_pipelin
   - 结果：eval_loss **2.8188**（perplexity **16.76**），训练 loss 1.396
 - SFT：`models/checkpoints/sft_v1_512/`（v1 基座）
 
-### 基座对比（同一 `.bin`、同一 `--max-rows 512`，口径严格一致）
+### 基座对比（历史口径：`--max-rows 512` 取 .bin 最前面的窗口）
 
-| 基座 | 训练步数 | 训练 tokens | 通用 eval_loss | 通用 ppl | 代码领域 eval_loss | 代码领域 ppl |
-|---|---|---|---|---|---|---|
-| `pretrain_v1_512` | 49,509 | 0.68 亿 | 3.6323 | 37.80 | — | — |
-| `pretrain_v2_full` | 211,000 | 8.6 亿 | **3.1637** | **23.66** | 4.3919 | 80.79 |
-| `pretrain_domain_code` | +26,847（领域续训） | +1.1 亿 | 3.5095 | 33.43 | **3.3576** | **28.72** |
+> ⚠️ **口径警告（2025-09 修订）**：下表是历史数据，用 `evaluate_pretrain.py --max-rows 512` 测的，那取的是 `.bin` **最前面**的 512 个窗口——对参与过训练的 bin 而言就是**训练集 loss**，不是泛化指标；而且本语料按领域排序（头部中文创作/指令、尾部英文选择题），实测同一 checkpoint 取头部 vs 取验证集 ppl 可差 3 倍以上（v2：头部 23.40 / 尾部 6.78 / 全局分块验证集见下表）。
+> **同一批窗口内的横向对比仍然可用**（三个基座测的是同一批窗口），但绝对数值不代表泛化能力。
+> 新版协议：`scripts/evaluate_pretrain.py --split val`（均匀分块 + 双端对齐文档边界，与训练同一口径，切分范围记录在 `metrics.json:data_split`）。
 
-10 小时把同切分 ppl 从 37.8 降到 23.7，是本仓库"规模换质量"最直接的一组数据。
+| 基座 | 训练步数 | 训练 tokens | 通用 eval_loss（旧口径） | 通用 ppl（旧口径） | 代码领域 ppl（旧口径） | **通用 ppl（新协议）** | **代码领域 ppl（新协议）** |
+|---|---|---|---|---|---|---|---|
+| `pretrain_v1_512` | 49,509 | 0.68 亿 | 3.6323 | 37.80 | — | **33.56** | — |
+| `pretrain_v2_full` | 211,000 | 8.6 亿 | **3.1637** | **23.66** | 80.79 | **15.82** | 84.56 |
+| `pretrain_domain_code` | +26,847（领域续训） | +1.1 亿 | 3.5095 | 33.43 | **28.72** | **22.93** | **28.02** |
+
+> 新协议 = `--split val`（均匀分块 + 双端对齐文档边界，497 个窗口，与训练集**文档级零重叠**）。
+> 结论方向与旧口径一致但幅度更清晰：v1→v2 通用 ppl **33.56 → 15.82**；领域续训把代码领域 ppl
+> **84.56 → 28.02（−67%）**，代价是通用 ppl **15.82 → 22.93（+45%）**。
+
+10 小时把同口径 ppl 从 37.8 降到 23.7（新协议 33.6 → 15.8），是本仓库"规模换质量"最直接的一组数据。
 
 **领域增量预训练（`dataset/IndustryCorpus2_computer_programming_code_high`）**：74 分钟、lr=1e-4、1 epoch、
-混入 15% 通用语料，把代码领域 ppl 从 **80.79 打到 28.72（−64%）**；但代价是通用 ppl 从 23.66 退到 33.43
-（**+41%**）——15% 混料不足以抵消 1e-4 一步到位的偏移，属于典型的部分灾难性遗忘。下游对话 SFT 的 eval_loss
+混入 15% 通用语料，把代码领域 ppl 从 **84.56 打到 28.02（−67%）**；但代价是通用 ppl 从 15.82 退到 22.93
+（**+45%**）——15% 混料不足以抵消 1e-4 一步到位的偏移，属于典型的部分灾难性遗忘。下游对话 SFT 的 eval_loss
 也从 2.7795 升到 2.9087，样例里甚至出现"抱歉，我无法回答这个问题。但我可以告诉你关于计算机程序的语法和编程模型"。
 结论：**领域自适应必须双口径验收**（`bash scripts/run_domain_compare.sh`），并按需降低 lr（1e-5~3e-5）、
 提高混料比（30%+）或减少步数；本次数据保留下来正是为了说明"领域增益 ≠ 无损"。
+
+### ⚠️ CoT 评测集口径修正（重要）
+
+`scripts/build_cot_sft.py` 旧实现用"换 seed"来避免训练/评测重合，但 **easy profile 的操作数只有 1..9，
+全部唯一题目仅 1063 个**，而训练集有数万行——实测旧 `cot_eval_easy_zh.jsonl` 的 156 条题目
+**100%** 出现在 60k 训练集里，旧 `cot_eval_zh.jsonl` 也有 **33.5%** 重合。
+也就是说下面表中的"easy 90%→100%"测的是**记忆**，不是泛化。
+
+现已修复：生成器改为"先去重建池、再把留出集切出来"，并在落盘前自检零重合；同时提供两份
+**与训练集零重合**的留出集：
+
+```bash
+# 与 sft_cot_easy_60k.jsonl 零重合（用 --easy-max 20 扩大题目空间）
+dataset/sft/cot_eval_easy_disjoint.jsonl
+# 与 sft_cot_hard_80k.jsonl 零重合
+dataset/sft/cot_eval_hard_disjoint.jsonl
+```
+
+`scripts/run_downstream_evals.sh` 已优先使用这两份文件。**下表中的 easy 100% 需要在 GPU 上用新留出集重测**；
+`cot_eval_easy_disjoint.jsonl` 对应的训练集是 `sft_cot_easy_disjoint60k.jsonl`（9500+ 唯一题目），
+需要用 `scripts/build_cot_sft.py --profile easy --easy-max 20` 重新生成配套训练集后再 SFT。
+
+### 下一步实验：容量 vs 步数（isotoken 消融）
+
+hard CoT（多位数运算）的瓶颈究竟是**容量**还是**训练量**，可以用同 token 预算下的扩容消融直接回答：
+
+```bash
+# 512/10/8 = 47.9M（已有基线 pretrain_v2_full，8.6 亿 tokens）
+# 768/12/12 = 109.6M，同样 8.6 亿 tokens => 52,490 步 @ bs16×ctx1024
+DRY_RUN=1 bash scripts/run_capacity_ablation.sh          # 只打印命令，可在无 GPU 环境检查
+setsid nohup env TAG=cap768 TOKENS=8.6e8 BS=16 ACCUM=1 \
+  bash scripts/run_capacity_ablation.sh > models/checkpoints/cap768.log 2>&1 &
+```
+
+判据：若 cap768 在 `cot_eval_hard_disjoint.jsonl` 上显著超过 512/10/8，则"容量墙"成立，
+应继续扩宽/加深而不是加步数；若持平，则瓶颈在数据/监督方式（例如需要 scratchpad 式多步监督）。
+
+**⚠️ 该实验需要单卡 ≥16GB，本仓库开发环境无 GPU，脚本只完成到"命令行拼装 + 语法检查"，
+训练尚未执行。**
 
 ### 下游 SFT / CoT（v2 基座，`models/checkpoints/sft_v2_*`）
 

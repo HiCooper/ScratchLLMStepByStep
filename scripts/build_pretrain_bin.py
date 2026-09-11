@@ -37,7 +37,8 @@ def cmd_info(args):
     if meta:
         for k, v in meta.items():
             print(f"  {k}: {v}")
-    arr = np.fromfile(args.bin, dtype=(meta or {}).get("dtype", "uint16"))
+    # 用 memmap 只映射、不整份读入内存（全量 uint16 约 500MB、uint32 约 1GB）
+    arr = np.memmap(args.bin, dtype=(meta or {}).get("dtype", "uint16"), mode="r")
     print(f"  actual_tokens: {arr.size}")
 
 

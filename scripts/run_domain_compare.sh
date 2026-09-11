@@ -7,7 +7,7 @@
 # 产物：models/checkpoints/ppl_code_domain_<标签>.json、models/checkpoints/TRAINING_REPORT.md
 #
 # 用法：TAG=domain bash scripts/run_domain_compare.sh
-set -uo pipefail
+set -euo pipefail
 cd "$(dirname "$0")/.."
 
 TOK="${TOK:-models/tokenizer_v3}"

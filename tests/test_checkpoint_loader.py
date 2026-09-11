@@ -82,3 +82,62 @@ def test_vocab_matches_tokenizer(tmp_path):
     assert kws["vocab_size"] == 128
     with torch.no_grad():
         assert loaded(torch.randint(0, 128, (1, 4))).shape == (1, 4, 128)
+
+
+# ---------------------------------------------------------------------------
+# P2：新架构字段的反推与宽容加载
+# ---------------------------------------------------------------------------
+def _tiny_state(**cfg_kw):
+    from minigpt.model.transformer import GPTConfig, MiniGPT
+    m = MiniGPT(GPTConfig(vocab_size=64, emb_dim=32, n_layers=2, n_heads=2,
+                          context_length=16, drop_rate=0.0, **cfg_kw))
+    return m.state_dict()
+
+
+def test_infer_new_architecture_fields():
+    from minigpt.model.checkpoint import infer_model_kwargs
+    sd = _tiny_state()                       # 默认：layernorm + GELU + 无 head bias
+    kws = infer_model_kwargs(sd)
+    assert kws["norm_type"] == "layernorm"
+    assert kws["lm_head_bias"] is False
+    assert kws["ffn_hidden_dim"] == 4 * 32    # GELU: 4d
+    assert "out_head.bias" not in sd
+
+    sd_rn = _tiny_state(norm_type="rmsnorm")
+    assert infer_model_kwargs(sd_rn)["norm_type"] == "rmsnorm"
+
+    sd_sw = _tiny_state(use_swiglu=True)
+    kws_sw = infer_model_kwargs(sd_sw)
+    assert kws_sw["use_swiglu"] is True
+    assert kws_sw["ffn_hidden_dim"] == 64      # 8/3*32=85.3 就近对齐到 64 的倍数
+
+    sd_b = _tiny_state(lm_head_bias=True)
+    assert infer_model_kwargs(sd_b)["lm_head_bias"] is True
+
+
+def test_tolerant_load_ignores_legacy_head_bias():
+    """旧产物带 out_head.bias、新结构不带：良性差异应被忽略而不是报错。"""
+    from minigpt.model.checkpoint import load_state_into_model
+    from minigpt.model.transformer import GPTConfig, MiniGPT
+    sd = _tiny_state()
+    sd["out_head.bias"] = torch.zeros(64)      # 模拟旧 checkpoint
+    model = MiniGPT(GPTConfig(vocab_size=64, emb_dim=32, n_layers=2, n_heads=2,
+                              context_length=16, drop_rate=0.0))
+    load_state_into_model(model, sd)           # 不应抛异常
+
+
+def test_tolerant_load_still_rejects_real_mismatch():
+    """真实的架构不匹配必须显式失败，绝不能静默续训到错误权重。"""
+    from minigpt.model.checkpoint import load_state_into_model
+    from minigpt.model.transformer import GPTConfig, MiniGPT
+    sd = _tiny_state()
+    sd["decode_layers.0.ffn.layers.0.weight"] = torch.zeros(999, 32)   # 形状/结构不符
+    model = MiniGPT(GPTConfig(vocab_size=64, emb_dim=32, n_layers=2, n_heads=2,
+                              context_length=16, drop_rate=0.0))
+    try:
+        load_state_into_model(model, sd)
+    except RuntimeError as exc:
+        msg = str(exc)
+        assert "缺少关键权重" in msg or "未知权重" in msg or "形状不匹配" in msg
+    else:
+        raise AssertionError("结构不匹配时必须报错")
