@@ -14,9 +14,17 @@ cd "$(dirname "$0")/.."
 
 BASE_DIR="${BASE_DIR:-models/checkpoints/pretrain_v5}"
 LOG="${LOG:-models/checkpoints/v5_chain.log}"
+PIDFILE="${PIDFILE:-models/checkpoints/v5_chain.pid}"
+# pidfile 由脚本**自己**写：启动方的 `setsid nohup bash ... & echo $! > pidfile`
+# 记到的是外层 `bash -c` 包装进程的 pid（实测就是这么错的），拿它去 kill 会杀错进程。
+echo $$ > "$PIDFILE"
+trap 'rm -f "$PIDFILE"' EXIT
 PATTERN="minigpt[.]train[.]pretrainer"
 WRAPPER="train_pretrain""_resilient.sh"
-MAX_TICKS="${MAX_TICKS:-2880}"          # 30s × 2880 = 24h
+MAX_TICKS="${MAX_TICKS:-5760}"          # 30s × 5760 = 48h
+# 为什么默认给到 48h 而不是刚好覆盖一次训练：这个计数是**进程**的预算，不是训练的预算——
+# 每次重启（会话中断、被误杀、二级监督重新拉起）都从头计时，而超时是**静默跳过整条下游**。
+# 实测：基座 17.5h + 下游 2~4h ≈ 21h，24h 的默认值只剩 3h 余量，一次重启就吃掉。
 DEAD_STREAK_LIMIT="${DEAD_STREAK_LIMIT:-6}"   # 连续 6 次（3 分钟）双缺席才判死
 
 # 重新拉起训练所需的环境（与首次启动一致；resume 由 resilient 脚本自己找最新 checkpoint）
