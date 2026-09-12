@@ -140,7 +140,10 @@ CoT 阶段的问题不是"数据量不够"，而是**题面空间与训练样本
 
 **规则**：让 `唯一题面数 ≥ 训练样本数 / 3`（重复 ≤3×）。60k 训练集对应 `--easy-max 40~50`。
 默认的 9 会让"100% 准确率"完全测不出泛化——这正是仓库里 `*_disjoint.jsonl` 要修的问题。
-（数据集侧已修：`build_cot_sft.py --easy-max 20` 生成 disjoint 训练集 + 零重合留出集。）
+（数据集侧已修：链路用 `build_cot_sft.py --profile easy --easy-max 50` 生成训练集
+`dataset/sft/sft_cot_easy_em50_60k.jsonl` 与零重合留出集 `cot_eval_easy_em50_disjoint.jsonl`。
+表里的"唯一题面数"是**生成器题池**的规模，不等于磁盘上某个具体文件的唯一题面数——
+旧文件被重生成过，直接数文件里的唯一题面会得到不同数字。）
 
 ### 9.2 评测必须分档
 

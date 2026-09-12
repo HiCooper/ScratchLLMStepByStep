@@ -42,8 +42,9 @@ pick() {
 }
 
 # 评测集选择：优先用与训练集**零重合**的 disjoint 留出集；旧的 cot_eval_easy_disjoint.jsonl
-# 实测 156/156 条全部出现在 60k 训练集里（easy-max 9 的题目空间只有 1064 个唯一题目），
-# 用它测出来的是记忆而不是泛化。缺失 disjoint 文件时才回退，并且必须告警。
+# 实测与现用训练集（em50）题面级重合 77/200 = 38.5%（生成器侧：easy-max 9 的题池只有 1063 个唯一题面，
+# 60k 训练集的平均重复次数高达 56×），用它测出来的是记忆而不是泛化。
+# 缺失 disjoint 文件时才回退，并且必须告警。
 EVAL_EASY="dataset/sft/cot_eval_easy_em50_disjoint.jsonl"
 [ -f "$EVAL_EASY" ] || { EVAL_EASY="dataset/sft/cot_eval_easy_disjoint.jsonl"; log "⚠️ 未找到 em50 disjoint easy 留出集，回退到被污染的旧评测集（结果不可作为泛化证据）"; }
 EVAL_HARD="dataset/sft/cot_eval_hard_disjoint.jsonl"

@@ -149,8 +149,8 @@ setsid nohup env PYTHONUNBUFFERED=1 python3 -m minigpt.train.sft_trainer \
   --paths_output_dir models/checkpoints/sft_v2_chat > models/checkpoints/sft_v2_chat.log 2>&1 &
 
 # 5.2 CoT（先在 easy 档验证机制，再上 hard）
-# easy 必须带 --easy-max 50：默认 9 的题目空间只有 1064 个唯一题，60000 条训练集里同一题重复 56×，
-# 且无法切出真正不相交的留出集（实测旧留出集 156/156 全部出现在训练集里）。
+# easy 必须带 --easy-max 50：默认 9 的题池只有 1064 个唯一题面，60000 条训练集里同一题平均重复 56×，
+# 且切不出真正不相交的留出集（实测旧留出集与现用训练集题面级重合 77/200 = 38.5%）。
 python scripts/build_cot_sft.py --profile easy --easy-max 50 --n-train 60000 --n-eval 200 \
   --out-train dataset/sft/sft_cot_easy_em50_60k.jsonl --out-eval dataset/sft/cot_eval_easy_em50_disjoint.jsonl
 setsid nohup env PYTHONUNBUFFERED=1 python3 -m minigpt.train.sft_trainer \

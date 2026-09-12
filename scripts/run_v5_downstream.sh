@@ -12,7 +12,8 @@
 # 设计依据（references/data-distribution.md）：
 #   - SFT 抽 4 万条 × 2 epoch = 8 万样本 / **实测 14.5M 监督 token**（scripts/audit_sft_lengths.py；
 #     旧注释写的"10 万条 / 21.2M"两处都估错了），对 47.9M 模型约 0.3 token/参数，量级合适
-#   - CoT easy 用 --easy-max 50：唯一题目 45200（easy-max 9 只有 1063）→ 重复率 56×→1.33×
+#   - CoT easy 用 --easy-max 50：生成器题池唯一题面 45200（easy-max 9 只有 1063）→ 平均重复 56×→1.33×
+#     （这组数字说的是**生成器题池**，不是磁盘文件的唯一题面数；验收看 audit_dataset.py 的重合检查）
 #   - 算术评测必须 --repetition-penalty 1.0
 #
 # 用法：BASE=models/checkpoints/pretrain_v5 bash scripts/run_v5_downstream.sh
