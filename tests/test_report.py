@@ -71,3 +71,26 @@ def test_curve_section_renders_noise_note():
     md = render(d)
     assert "评估噪声" in md and "±0.0442" in md and "511 个验证窗" in md
     assert "2.0k:5.1100" in md and "412.0k:2.7000" in md
+
+
+def test_difficulty_buckets_are_rendered():
+    """§4.5 必须把 by_difficulty 摊开——平均准确率看不出"简单题全对、难题全错"。"""
+    d = {"time": "2026-01-01 00:00:00", "pretrain": [], "sft": [], "ppl": {}, "samples": {},
+         "success_rate": {}, "curves": {},
+         "thinking": {"eval_v5_cot_easy": {
+             "n": 200, "accuracy": {"plain": 0.42, "single": 0.55},
+             "by_difficulty": {"个位数加减": {"n": 120, "plain": 0.9, "single": 0.95},
+                               "两位数加减": {"n": 60, "plain": 0.1, "single": 0.2},
+                               "多步混合": {"n": 20, "plain": 0.0, "single": 0.0}}}}}
+    md = render(d)
+    assert "## 4.5" in md and "个位数加减" in md
+    assert "| 个位数加减 | 120 | 90.0% | 95.0% |" in md
+    assert "| 多步混合 | 20 | 0.0% | 0.0% |" in md
+
+
+def test_difficulty_section_degrades_without_buckets():
+    """没有 by_difficulty（老产物/未分档评测）时给提示，而不是崩或留空表。"""
+    d = {"time": "t", "pretrain": [], "sft": [], "ppl": {}, "samples": {}, "success_rate": {},
+         "curves": {}, "thinking": {"eval_old_cot_easy": {"n": 60, "accuracy": {"plain": 1.0}}}}
+    md = render(d)
+    assert "## 4.5" in md and "尚未产出" in md

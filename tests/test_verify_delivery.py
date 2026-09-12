@@ -70,10 +70,13 @@ def _make_tree(cp: str, ds: str, eval_loss: float = 2.70) -> None:
         "bin_vocab": 32000})
     for name in ("eval_v5_cot_easy", "eval_v5_cot_hard"):
         _w(os.path.join(cp, f"{name}.json"),
-           {"summary": {"n": 200, "accuracy": {"plain": 0.31, "single": 0.28}}})
+           {"summary": {"n": 200, "accuracy": {"plain": 0.31, "single": 0.28},
+                        "by_difficulty": {"个位数加减": {"n": 120, "plain": 0.4, "single": 0.4},
+                                          "两位数加减": {"n": 80, "plain": 0.1, "single": 0.1}}}})
     _w(os.path.join(cp, "samples_v5_chat_probe.txt"), "场景 1\n回复：" + "好" * 400)
     _w(os.path.join(cp, "TRAINING_REPORT_v5.md"),
-       "# MiniGPT 训练报告\n## 1.5 曲线\n| 曲线 step:loss | 2.0k:5.1 |\n## 6. 历史基线对照\nbest.pt\n")
+       "# MiniGPT 训练报告\n## 1.5 曲线\n| 曲线 step:loss | 2.0k:5.1 |\n"
+       "## 4.5 分档\n## 6. 历史基线对照\nbest.pt\n")
     _w(os.path.join(cp, "downstream_v5", "SUMMARY.md"), "- ✅ 全部")
 
 

@@ -139,6 +139,9 @@ class Checker:
             self.add(bool(acc.get("plain") is not None), f"{label} 有 plain 准确率", str(acc.get("plain")))
             self.add(bool(acc.get("single") is not None), f"{label} 有 single 准确率", str(acc.get("single")))
             self.add(bool(n), f"{label} 有样本数 n", str(n))
+            self.add(bool((js.get("summary") or js).get("by_difficulty")),
+                     f"{label} 有分档准确率 by_difficulty",
+                     "平均准确率看不出容量墙")
         sample = os.path.join(self.cp, "samples_v5_chat_probe.txt")
         self.add(os.path.exists(sample) and os.path.getsize(sample) > 500,
                  "chat_probe 对话样例非空", f"{sample} {os.path.getsize(sample) if os.path.exists(sample) else 0}B")
@@ -150,6 +153,7 @@ class Checker:
             return
         txt = open(rep, encoding="utf-8").read()
         for need, why in (("## 1.5", "eval_loss 曲线/吞吐/ETA 章节"),
+                          ("## 4.5", "CoT 分档准确率章节"),
                           ("## 6.", "历史基线对照章节"),
                           ("step:loss", "曲线数据点"),
                           ("best.pt", "各阶段产物路径")):

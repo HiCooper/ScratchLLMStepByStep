@@ -337,6 +337,25 @@ def render(d: dict) -> str:
     else:
         L.append("（尚未产出：等待 4a/4b 阶段）")
 
+    L += ["", "## 4.5 CoT 分档准确率（`by_difficulty`）", "",
+          "> 平均准确率会把「简单题全对、难题全错」抹平成一个中不溜的数字，看不出**容量墙**。"
+          "档位由题面决定（`eval_thinking.py::bucket_of`），与 §4 出自同一份 json。", ""]
+    bucketed = {n: js for n, js in d["thinking"].items()
+                if isinstance(js, dict) and js.get("by_difficulty")}
+    if bucketed:
+        for name, js in sorted(bucketed.items()):
+            bd = js["by_difficulty"]
+            strats = sorted({k for v in bd.values() for k in v if k != "n"})
+            L += [f"**{name}**", "",
+                  "| 档位 | n | " + " | ".join(strats) + " |",
+                  "|---|---|" + "---|" * len(strats)]
+            for b, v in bd.items():
+                cells = " | ".join("—" if v.get(s) is None else f"{v[s]:.1%}" for s in strats)
+                L.append(f"| {b} | {v.get('n')} | {cells} |")
+            L.append("")
+    else:
+        L.append("（尚未产出：等待 4a/4b 阶段，或评测未加 `--strategies`）")
+
     L += ["", "## 5. 问答 / 生成样例", ""]
     if d["samples"]:
         for name, text in d["samples"].items():
