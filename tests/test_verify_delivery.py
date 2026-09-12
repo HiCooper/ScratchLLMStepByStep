@@ -55,6 +55,7 @@ def _make_tree(cp: str, ds: str, eval_loss: float = 2.70) -> None:
     })
     _touch(os.path.join(cp, "pretrain_v5", "final.pt"))
     _touch(os.path.join(cp, "pretrain_v5", "best.pt"))
+    _w(os.path.join(cp, "pretrain_v5", "sample.txt"), "输入: 什么是AI？\n生成: 人工智能是……")
     _w(os.path.join(ds, "bins", "pretrain_v5_full.meta.json"),
        {"dtype": "uint16", "lines": 6974328, "tokens": 1691885203, "vocab_size": 32000,
         "eos_id": 2})
@@ -63,6 +64,7 @@ def _make_tree(cp: str, ds: str, eval_loss: float = 2.70) -> None:
            {"step": step, "train_loss": 1.0, "eval_loss": 1.1, "best_eval_loss": 1.0,
             "best_step": step - 500})
         _touch(os.path.join(cp, run, "best.pt"))
+        _w(os.path.join(cp, run, "sample.txt"), "用户: 什么是AI？\n模型: 人工智能。")
     _w(os.path.join(cp, "ppl_v5_general.json"),
        {"eval_loss": 2.7, "perplexity": math.exp(2.7),
         "split": {"split": "blocked-document-aligned", "n_blocks": 511, "eval_rows": 512},
@@ -108,3 +110,17 @@ def test_partial_mode_never_fails(tmp_path):
     _make_tree(cp, ds)
     os.remove(os.path.join(cp, "ppl_v5_general.json"))
     assert Checker(cp, ds, partial=True).run() == 0
+
+
+def test_missing_sample_txt_fails(tmp_path):
+    """关键样例（各阶段 sample.txt）是交付要求第 5 条的一部分，缺了必须报出来。"""
+    cp, ds = str(tmp_path / "cp"), str(tmp_path / "dataset")
+    _make_tree(cp, ds)
+    assert Checker(cp, ds).run() == 0
+
+    os.remove(os.path.join(cp, "sft_v5_chat", "sample.txt"))
+    assert Checker(cp, ds).run() == 1
+
+    _make_tree(cp, ds)                                   # 复原后把基座样例清空
+    open(os.path.join(cp, "pretrain_v5", "sample.txt"), "w").close()
+    assert Checker(cp, ds).run() == 1

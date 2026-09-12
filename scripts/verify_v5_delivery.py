@@ -79,6 +79,10 @@ class Checker:
         if isinstance(ev, (int, float)):
             self.add(abs(math.exp(min(ev, 80.0)) - float(m.get("perplexity") or 0)) < 1e-3,
                      "基座 perplexity = exp(eval_loss)", f"{m.get('perplexity')}")
+        sample = os.path.join(run, "sample.txt")
+        self.add(os.path.exists(sample) and os.path.getsize(sample) > 20,
+                 "基座 sample.txt 非空（关键样例）",
+                 f"{os.path.getsize(sample) if os.path.exists(sample) else 0}B")
         split = (m.get("data_split") or {}).get("split")
         self.add(bool(split), "基座记录评估口径", str(split))
         self.add((m.get("best_eval_loss") is not None) and (m.get("best_step") is not None),
@@ -111,6 +115,10 @@ class Checker:
             return
         ev = m.get("eval_loss")
         self.add(isinstance(ev, (int, float)) and math.isfinite(ev), f"{label} eval_loss 有限", str(ev))
+        sample = os.path.join(d, "sample.txt")
+        self.add(os.path.exists(sample) and os.path.getsize(sample) > 20,
+                 f"{label} sample.txt 非空（关键样例）",
+                 f"{os.path.getsize(sample) if os.path.exists(sample) else 0}B")
         if expect_step:
             st = int(m.get("step") or 0)
             self.add(st >= expect_step * 0.9, f"{label} 步数接近预期", f"{st}/{expect_step}")
