@@ -112,8 +112,9 @@ NPROC=4 bash scripts/pretrain_start.sh --paths_output_dir models/checkpoints/pre
 | `scripts/run_downstream_evals.sh` | **只跑评测/出样**（4a~4d），可单独重跑；`TAG=... bash ...` |
 | `scripts/wait_and_run_downstream.sh` | **通用接力**：等 `$OUT_DIR/final.pt` → 跑上面的通用下游（`pipeline.sh` 自动拉起；`OUT_DIR` 必须传） |
 | `scripts/watch_v5_chain.sh` | **v5 生产接力**：等 final.pt → `run_v5_downstream.sh`，并**二级监督**训练守护（双缺席 3 分钟自动拉起） |
+| `scripts/resume_v5_chain.sh` | **一键恢复全链路**（幂等，已在跑的自动跳过）：训练守护 + janitor + watcher + 看板。**机器重启后必须跑它**——进程内监督扛得住"进程被杀"，扛不住整机重启（实测教训） |
 | 其余（按需） | `download_data.sh`、`train_tokenizer.py`、`check_env.py`/`estimate_resources.py`/`validate_pretrain.py`/`validate_ddp.py`（体检与校验）、`run_code_domain.sh`/`run_domain_compare.sh`/`run_capacity_ablation.sh`（领域与容量消融配方） |
-| `tests/` | `pytest tests/ -q`（270 passed；依赖真实 `dataset/` 的用例会自动 skip） |
+| `tests/` | `pytest tests/ -q`（279 passed；依赖真实 `dataset/` 的用例会自动 skip） |
 | `minigpt/README.md` | 指标面板、吞吐、看板、思考模式与实测结果 |
 
 ## 3. 各阶段标准命令
