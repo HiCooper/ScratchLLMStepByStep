@@ -50,7 +50,7 @@ log "=== 2) CoT easy（$COT_EASY_LINES 条 × $COT_EASY_EPOCHS epochs） ==="
 rm -rf "$COT_EASY"
 python3 -u -m minigpt.train.sft_trainer \
   --pretrain "$(pick "$CHAT")" --data_tokenizer_dir "$TOK" \
-  --sft-jsonl dataset/sft/sft_cot_easy_60k.jsonl --data_max_lines "$COT_EASY_LINES" --data_max_len 512 \
+  --sft-jsonl dataset/sft/sft_cot_easy_disjoint60k.jsonl --data_max_lines "$COT_EASY_LINES" --data_max_len 512 \
   --train_batch_size 8 --train_learning_rate 1.5e-5 --train_warmup_steps 100 \
   --train_eval_steps 500 --train_save_steps 4000 --train_epochs "$COT_EASY_EPOCHS" \
   --paths_output_dir "$COT_EASY"

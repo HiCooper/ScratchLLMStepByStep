@@ -23,7 +23,7 @@
 ```bash
 bash skills/minigpt-train/scripts/preflight.sh            # 环境+资产+服务
 python3 -m pytest tests/ -q                               # 单测
-python3 scripts/build_pretrain_bin.py info --bin dataset/bins/pretrain_v3_full.bin
+python3 scripts/build_pretrain_bin.py info --bin dataset/bins/pretrain_v4_full.bin
 python3 scripts/train_dashboard.py --once                 # 训练进度
 tail -n 30 models/checkpoints/pretrain_v2_full.log
 ```

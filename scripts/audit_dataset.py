@@ -265,9 +265,7 @@ def audit_cot_disjoint(do_scan: bool) -> None:
     """CoT 训练集 vs 评测集的题目重合度（仓库声称 disjoint 版本为 0）。"""
     sft_dir = ROOT / "dataset" / "sft"
     pairs = [("sft_cot_easy_disjoint60k.jsonl", "cot_eval_easy_disjoint.jsonl"),
-             ("sft_cot_hard_80k.jsonl", "cot_eval_hard_disjoint.jsonl"),
-             ("sft_cot_easy_60k.jsonl", "cot_eval_easy_zh.jsonl"),
-             ("sft_cot_hard_80k.jsonl", "cot_eval_zh.jsonl")]
+             ("sft_cot_hard_80k.jsonl", "cot_eval_hard_disjoint.jsonl")]
     if not do_scan:
         return
     for train_name, eval_name in pairs:
@@ -299,9 +297,17 @@ def audit_cot_disjoint(do_scan: bool) -> None:
 # ------------------------------------------------------------------ parquet
 def audit_parquet() -> None:
     import glob as _glob
+
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        pq = None
+
     for d in sorted(glob.glob(str(ROOT / "dataset" / "IndustryCorpus2_*"))):
         root = Path(d)
         on_disk = sorted(root.rglob("*.parquet"))
+        if not on_disk:
+            continue
         visible = sorted(_glob.glob(os.path.join(d, "**", "*.parquet"), recursive=True))
         msc = root / ".msc"
         recorded = 0
@@ -311,13 +317,35 @@ def audit_parquet() -> None:
                            if str(p.relative_to(root)).encode() in blob)
         temp = [p for p in on_disk if "._____temp" in str(p)]
         size = sum(p.stat().st_size for p in on_disk)
-        detail = (f"{len(on_disk)} 个 parquet / {human(size)}；.msc 登记 {recorded}；"
-                  f"glob 可见 {len(visible)}；残留 temp {len(temp)}")
-        if temp or recorded < len(on_disk):
+
+        # 以「能否解析」为唯一硬证据：ModelScope 的半截下载连 parquet footer 都没有，
+        # 只看文件名/.msc 登记都会误判（.msc 不更新不代表文件坏，文件坏也不一定在 temp 里）。
+        corrupt: list[str] = []
+        if pq is not None:
+            for p in on_disk:
+                try:
+                    pq.ParquetFile(p).metadata          # 只读 footer
+                except Exception:                        # noqa: BLE001
+                    corrupt.append(str(p.relative_to(root)))
+        corrupt_in_temp = [p for p in corrupt if "._____temp" in p]
+
+        detail = (f"{len(on_disk)} 个 parquet / {human(size)}；可解析 "
+                  f"{len(on_disk) - len(corrupt)}；glob 可见 {len(visible)}；"
+                  f"隐藏目录 {len(temp)}；.msc 登记 {recorded}")
+        if corrupt and not corrupt_in_temp:
             add("BLOCKER", f"parquet:{root.name}", detail,
-                f"有 {len(temp)} 个文件停在 ._____temp（下载被中断，未校验/未落正式目录），"
-                f"且 glob(**/*.parquet) 默认**不匹配隐藏目录** → 直接转换会静默少 {len(temp)} 个文件。"
-                f"先续传（modelscope download --dataset ... --local_dir {root.name}）或显式排除后再转换")
+                f"有 {len(corrupt)} 个分片无法解析（下载截断）：{corrupt[:3]}。"
+                f"先删除后重新下载，否则转换会在半路产出截断的 jsonl")
+        elif corrupt_in_temp:
+            add("BLOCKER", f"parquet:{root.name}", detail,
+                f"隐藏目录 ._____temp 里有 {len(corrupt_in_temp)} 个**损坏**分片（半截下载），"
+                f"且 glob(**/*.parquet) 不匹配隐藏目录 → 直接转换会静默少这些文件。"
+                f"续传：modelscope download --dataset <repo> --local_dir <该子目录> "
+                f"--include <缺失分片>（本轮已按此修复 8 个，可用 scripts/audit_dataset.py 复核）")
+        elif temp:
+            add("WARN", f"parquet:{root.name}", detail,
+                f"隐藏目录里有 {len(temp)} 个可解析的 parquet，glob 看不到它们 → "
+                f"转换会静默漏掉；确认可用后移出 ._____temp 再转换")
         else:
             add("OK", f"parquet:{root.name}", detail)
 
@@ -333,20 +361,31 @@ def audit_domain_jsonl() -> None:
 # --------------------------------------------------------------- 磁盘/预算
 def audit_budget(bins: list[dict]) -> None:
     import shutil
+    from minigpt.config import estimate_params
     free = shutil.disk_usage(ROOT).free
-    total_tokens = sum(b.get("tokens", 0) for b in bins)
-    add("OK", "disk", f"可用 {human(free)} / 现有语料 {total_tokens/1e6:.1f}M tokens")
+    # derived：由其它 bin 的语料**派生**出来的混合产物（算进去就是重复计数）
+    # superseded：被新版本取代的旧 bin（v3/mini、code_domain 已在清理中删除，这里只留兜底）
+    derived = {"domain_code70_general30.bin", "domain_code50_general50.bin"}
+    # v4 是 v5 的 A/B 对照组（同 token 预算、纯通用），与 v5 同源，不能重复计入预算
+    superseded = {"pretrain_v3_full.bin", "code_domain.bin", "pretrain_v4_full.bin"}
+    usable = [b for b in bins if Path(b["path"]).name not in superseded | derived]
+    total_tokens = sum(b.get("tokens", 0) for b in usable)
+    # 只列**磁盘上真实存在**而被排除的（旧版删掉后不该再出现在报告里）
+    skipped = sorted(n for n in superseded | derived
+                     if (ROOT / "dataset" / "bins" / n).exists())
+    add("OK", "disk", f"可用 {human(free)} / 可用语料（已排除取代/对照/派生）{total_tokens/1e6:.1f}M tokens"
+        + (f"；未计入 {', '.join(skipped)}" if skipped else ""))
     for mc in (ModelConfig(), ModelConfig(emb_dim=768, n_layers=12, n_heads=12)):
-        from minigpt.config import estimate_params
         params = estimate_params(mc.emb_dim, mc.n_layers, mc.vocab_size or 32000,
                                  use_swiglu=mc.use_swiglu, tie_word_embeddings=mc.tie_word_embeddings)
-        ckpt = params * 16  # fp16 权重2 + fp32 主权重4 + 动量4 + 方差4 + 梯度(峰值时)2
-        need = ckpt * 1.6   # 峰值：优化器+激活余量
+        ckpt = params * 16  # fp16 权重2 + fp32 主权重4 + 动量4 + 方差4 + 峰值梯度2
         ratio = total_tokens / params
+        epochs = 20 / ratio if ratio else 0
         add("OK", f"budget:{mc.emb_dim}/{mc.n_layers}/{mc.n_heads}",
             f"{params/1e6:.1f}M params；单 checkpoint≈{human(ckpt)}；"
-            f"现有 tokens/params={ratio:.1f}×"
-            + ("（接近 Chinchilla 20×）" if ratio >= 15 else "（偏少，需扩语料或多 epoch）"))
+            f"单遍 tokens/params={ratio:.1f}×"
+            + (f"（达到 Chinchilla 20× 需约 {epochs:.1f} 个 epoch，或补语料）" if ratio < 15
+               else "（已达 Chinchilla 20×）"))
 
 
 # ---------------------------------------------------------------------- main
@@ -362,8 +401,13 @@ def main() -> int:
     bins = audit_bins(vocab)
 
     # 语料 ↔ bin 的行数对账（约定映射，见 AGENTS.md）
-    mapping = [("dataset/pretrain_t2t_mini.jsonl", "pretrain_v3_full.bin"),
-               ("dataset/domain/code_corpus.jsonl", "code_domain.bin")]
+    mapping = [("dataset/mixed/pretrain_v5_general80_structured20.jsonl", "pretrain_v5_full.bin"),
+               ("dataset/pretrain_t2t.jsonl", "pretrain_v4_full.bin"),
+               ("dataset/domain/code_corpus.dedup.jsonl", "code_domain_dedup.bin"),
+               ("dataset/mixed/domain_code70_general30.jsonl", "domain_code70_general30.bin"),
+               ("dataset/mixed/domain_code50_general50.jsonl", "domain_code50_general50.bin"),
+               ("dataset/domain/finance_corpus.jsonl", "finance_corpus.bin"),
+               ("dataset/domain/math_clean.jsonl", "math_clean.bin")]
     by_name = {Path(b["path"]).name: b for b in bins}
     for corpus, bin_name in mapping:
         cp = ROOT / corpus

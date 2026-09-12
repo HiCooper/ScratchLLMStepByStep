@@ -1,7 +1,7 @@
 #!/bin/bash
 # 领域自适应的"双口径"对比：同一批 checkpoint 分别在
-#   (a) 通用语料 dataset/bins/pretrain_v3_full.bin —— 看是否发生灾难性遗忘
-#   (b) 领域语料 dataset/bins/code_domain.bin     —— 看领域适配是否真的有效
+#   (a) 通用语料 dataset/bins/pretrain_v4_full.bin —— 看是否发生灾难性遗忘
+#   (b) 领域语料 dataset/bins/code_domain_dedup.bin     —— 看领域适配是否真的有效
 # 上做同切分（同 --max-rows）ppl 评估，并刷新 TRAINING_REPORT.md。
 #
 # 产物：models/checkpoints/ppl_code_domain_<标签>.json、models/checkpoints/TRAINING_REPORT.md
@@ -17,7 +17,7 @@ cd "$(dirname "$0")/.."
 
 TOK="${TOK:-models/tokenizer_v3}"
 TAG="${TAG:-domain}"
-DOM_BIN="${DOM_BIN:-dataset/bins/code_domain.bin}"
+DOM_BIN="${DOM_BIN:-dataset/bins/code_domain_dedup.bin}"
 MAX_ROWS="${MAX_ROWS:-512}"   # 保留兼容：新口径由 --split val 决定评估窗口
 # 领域基座（本 run）与对照基座（增量续训的起点）
 DOM_CKPT="${DOM_CKPT:-models/checkpoints/pretrain_${TAG}_code/final.pt}"

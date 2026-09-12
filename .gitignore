@@ -15,7 +15,11 @@ env/
 *.pt
 checkpoint-*/
 /models/
-/dataset/
+# 注意：必须写成 /dataset/*（忽略内容）而不是 /dataset/（忽略目录本身）——
+# git 不会进入被忽略的目录，写目录形式时下面的否定规则不生效
+/dataset/*
+# 例外：dataset/README.md 是文档（各阶段数据源说明），不是数据，应该进版本库
+!/dataset/README.md
 /data/
 
 # 日志

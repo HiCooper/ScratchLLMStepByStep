@@ -25,7 +25,7 @@ TAG="${TAG:-v2}"
 TOK="${TOK:-models/tokenizer_v3}"
 N="${N:-60}"
 PPL_CKPTS="${PPL_CKPTS:-models/checkpoints/pretrain_v1_512/final.pt models/checkpoints/pretrain_v2_full/final.pt}"
-BIN="${BIN:-dataset/bins/pretrain_v3_full.bin}"
+BIN="${BIN:-dataset/bins/pretrain_v4_full.bin}"
 
 CHAT="models/checkpoints/sft_${TAG}_chat"
 COT_EASY="models/checkpoints/sft_${TAG}_cot_easy"
@@ -41,13 +41,13 @@ pick() {
   else echo ""; fi
 }
 
-# 评测集选择：优先用与训练集**零重合**的 disjoint 留出集；旧的 cot_eval_easy_zh.jsonl
+# 评测集选择：优先用与训练集**零重合**的 disjoint 留出集；旧的 cot_eval_easy_disjoint.jsonl
 # 实测 156/156 条全部出现在 60k 训练集里（easy 题目空间总共只有 1064 个唯一题目），
 # 用它测出来的是记忆而不是泛化。缺失 disjoint 文件时回退并告警。
 EVAL_EASY="dataset/sft/cot_eval_easy_disjoint.jsonl"
-[ -f "$EVAL_EASY" ] || { EVAL_EASY="dataset/sft/cot_eval_easy_zh.jsonl"; log "⚠️ 未找到 disjoint easy 留出集，回退到被污染的旧评测集（结果不可作为泛化证据）"; }
+[ -f "$EVAL_EASY" ] || { EVAL_EASY="dataset/sft/cot_eval_easy_disjoint.jsonl"; log "⚠️ 未找到 disjoint easy 留出集，回退到被污染的旧评测集（结果不可作为泛化证据）"; }
 EVAL_HARD="dataset/sft/cot_eval_hard_disjoint.jsonl"
-[ -f "$EVAL_HARD" ] || { EVAL_HARD="dataset/sft/cot_eval_zh.jsonl"; log "⚠️ 未找到 disjoint hard 留出集，回退到旧评测集（约 33% 与训练集重合）"; }
+[ -f "$EVAL_HARD" ] || { EVAL_HARD="dataset/sft/cot_eval_hard_disjoint.jsonl"; log "⚠️ 未找到 disjoint hard 留出集，回退到旧评测集（约 33% 与训练集重合）"; }
 
 log "=== 4a) 思考模式评测：easy（TAG=$TAG, N=$N, eval=$EVAL_EASY）==="
 CK=$(pick "$COT_EASY")

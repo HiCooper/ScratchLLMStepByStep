@@ -109,3 +109,22 @@ def test_eval_scripts_have_help_and_no_syntax_error():
         r = subprocess.run([sys.executable, os.path.join(SCRIPTS, name), "--help"],
                            capture_output=True, text=True, cwd=ROOT)
         assert r.returncode == 0, f"{name} --help 失败: {r.stderr[:400]}"
+
+
+def test_eval_thinking_buckets_by_difficulty():
+    """CoT 评测必须能**分档**报准确率：单一平均会掩盖"简单题全对、难题全错"。
+
+    真实背景：47.9M 参数在多位数乘加上是容量墙，继续堆同分布数据无用——
+    只有分档（规模×题型）才看得出该扩模型还是该补数据。
+    """
+    sys.path.insert(0, SCRIPTS)
+    from eval_thinking import bucket_of
+
+    assert bucket_of("请计算 20 + 8 - 2 等于多少？") == "mixed_small"
+    assert bucket_of("请计算 361 + 67 - 77 等于多少？") == "mixed_big"
+    assert bucket_of("请计算 9867 - 616 等于多少？") == "sub_big"
+    assert bucket_of("请计算 12 × 13 等于多少？") == "mul_small"
+    assert bucket_of("请计算 123 × 45 等于多少？") == "mul_big"
+    assert bucket_of("请计算 8 ÷ 2 等于多少？") == "div_small"
+    assert bucket_of("小明原来有 34 个苹果，又买了 8 个，然后吃掉了 13 个。请问现在还剩多少").startswith("word_")
+    assert bucket_of("你好") == "other"

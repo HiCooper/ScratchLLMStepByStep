@@ -30,26 +30,20 @@ bash skills/minigpt-train/scripts/pipeline.sh --smoke
 bash skills/minigpt-train/scripts/pipeline.sh --full --hours 10
 ```
 
-`preflight.sh` 会在末尾给出 `[PRESET] <名字> …`，同时写入 `models/checkpoints/preflight.json` 的 `preset` 字段
-（包含模型尺寸、batch、ctx、AMP、compile、nproc、预期吞吐、预估步长），`pipeline.sh` 直接消费它。
 
 ## 1. 环境自适应（**先判断硬件，再决定参数**）
 
-| 预设 | 触发条件 | 模型 | batch×ctx | 精度 | compile | nproc | 实测/预估吞吐 |
-|---|---|---|---|---|---|---|---|
-| `cpu` | 无 CUDA GPU（含 MPS 回退） | 128/2/4 | 8×128 | fp32 | ✗ | 1 | **实测 0.12–0.17k tok/s**（6 核） |
-| `gpu-tiny` | 单卡 <5.5GB | 384/8/8 | 4×384 | fp16 | ✓ | 1 | ~10–18k tok/s |
-| `gpu-small` | 单卡 5.5–8GB | **512/10/8** | 8×512 | fp16 | ✓ | 1 | **22–30k tok/s**（RTX2060 实测） |
-| `gpu-mid` | 单卡 8–16GB | 512/10/8 | 12×1024 | fp16 | ✓ | 1 | ~30–50k tok/s |
-| `gpu-large` | 单卡 ≥16GB | 768/12/12 | 16×1024 | fp16 | ✓ | 1 | ~60k+ tok/s |
-| `multi-gpu` | ≥2 张 GPU | 按单卡显存档 | 每卡 8–16 | fp16 | ✓ | N | ≈单卡×N×0.85（NCCL 开销） |
+**不要手挑参数**：`preflight.sh` 会把硬件判定写成 `models/checkpoints/preflight.json: preset`，
+`pipeline.sh` 自动消费；也可 `--preset cpu|gpu-tiny|gpu-small|gpu-mid|gpu-large|multi-gpu` 手动覆盖。
+矩阵（判定条件 / 模型 / batch×ctx / 精度 / compile / 吞吐）与 JSON 字段含义见
+**`references/training-recipes.md §0`**（唯一详述处）。下面是三条例外情况的处置：
 
 ### 1.1 没有 GPU 怎么办（agent 必须这样处理）
 1. **明确降级预期**：CPU 只能做「机制验证」，不要承诺可读模型。实测本机 6 核约 **120–170 tok/s**，
    1 小时仅 ~0.5M tokens（GPU 是它的 100 倍以上）。
 2. 用 CPU 预设（自动检测即为 `cpu`，也可显式 `--preset cpu`）：
    - 模型 128/2/4、ctx 128、batch 8、`--train_mixed_precision_dtype none`、`--train_torch_compile False`；
-   - 语料只取前 2 万行（`pipeline.sh --full --preset cpu` 会自动建 `dataset/bins/pretrain_v3_20k.bin`）；
+   - 语料只取前 2 万行（`pipeline.sh --full --preset cpu` 会按需建 `dataset/bins/pretrain_cpu20k.bin`，不必手工准备）；
    - 目标步数按预算换算（见 §1.4），建议 200–2000 步，先跑 `--smoke` 验证链路。
 3. 可选优化：提高 CPU 线程（`OMP_NUM_THREADS=物理核数`）、把 `--train_num_workers 2` 用于数据加载；
    不要开 `torch.compile`（CPU 收益不稳定）。
@@ -117,22 +111,21 @@ NPROC=4 bash scripts/pretrain_start.sh --paths_output_dir models/checkpoints/pre
 ## 3. 各阶段标准命令
 
 ```bash
-# 数据（幂等；自动选 uint16/uint32 并写 meta）
-python scripts/build_pretrain_bin.py build --corpus-jsonl dataset/pretrain_t2t_mini.jsonl \
-  --tokenizer-dir models/tokenizer_v3 --out-bin dataset/bins/pretrain_v3_full.bin --max-lines 0
+# 造 bin（幂等；自动选 uint16/uint32 并写 meta）。已有成品则跳过 → dataset/README.md
+python scripts/build_pretrain_bin.py build --corpus-jsonl dataset/pretrain_t2t.jsonl \
+  --tokenizer-dir models/tokenizer_v3 --out-bin dataset/bins/pretrain_v5_full.bin --nproc 6
 
-# 预训练（把 --model_*/--train_* 换成 §1 表格中对应预设）
+# 预训练基座（--model_*/--train_* 用 §1 预设；下面是 gpu-small 档）
+# 长任务必须 setsid nohup 起来，别前台阻塞
 setsid nohup env PYTHONUNBUFFERED=1 python3 -m minigpt.train.pretrainer \
-  --data_tokenizer_dir models/tokenizer_v3 --data_tokenized_bin dataset/bins/pretrain_v3_full.bin \
-  --data_eval_ratio 0.001 \
+  --data_tokenizer_dir models/tokenizer_v3 \
+  --data_tokenized_bin dataset/bins/pretrain_v5_full.bin --data_eval_ratio 0.002 \
   --model_emb_dim 512 --model_n_layers 10 --model_n_heads 8 --model_context_length 512 \
-  --train_batch_size 8 --train_learning_rate 6e-4 --train_warmup_steps 200 \
-  --train_eval_steps 2000 --train_save_steps 4000 --train_max_steps 211000 \
-  --train_epochs 7 --train_torch_compile True \
-  --paths_last_checkpoint_path <latest checkpoint-*.pth> \
-  --paths_output_dir models/checkpoints/pretrain_v2_full > models/checkpoints/pretrain_v2_full.log 2>&1 &
+  --train_batch_size 8 --train_learning_rate 6e-4 --train_warmup_steps 2000 \
+  --train_eval_steps 2000 --train_save_steps 4000 --train_epochs 1 --train_torch_compile True \
+  --paths_output_dir models/checkpoints/pretrain_v5 > models/checkpoints/pretrain_v5.log 2>&1 &
 
-# SFT / CoT / 评测 / 推理 见 §5、§6
+# 续训加 --paths_last_checkpoint_path <ckpt>；SFT / CoT / 评测 / 推理见 §5、§6
 ```
 
 ## 4. 监控（agent 必须定期执行并汇报）
@@ -157,10 +150,10 @@ setsid nohup env PYTHONUNBUFFERED=1 python3 -m minigpt.train.sft_trainer \
 
 # 5.2 CoT（先在 easy 档验证机制，再上 hard）
 python scripts/build_cot_sft.py --profile easy --n-train 60000 --n-eval 200 \
-  --out-train dataset/sft/sft_cot_easy_60k.jsonl --out-eval dataset/sft/cot_eval_easy_zh.jsonl
+  --out-train dataset/sft/sft_cot_easy_disjoint60k.jsonl --out-eval dataset/sft/cot_eval_easy_disjoint.jsonl
 setsid nohup env PYTHONUNBUFFERED=1 python3 -m minigpt.train.sft_trainer \
   --pretrain models/checkpoints/sft_v2_chat/final.pt --data_tokenizer_dir models/tokenizer_v3 \
-  --sft-jsonl dataset/sft/sft_cot_easy_60k.jsonl --data_max_lines 60000 --data_max_len 512 \
+  --sft-jsonl dataset/sft/sft_cot_easy_disjoint60k.jsonl --data_max_lines 60000 --data_max_len 512 \
   --train_batch_size 8 --train_learning_rate 1.5e-5 --train_epochs 2 \
   --paths_output_dir models/checkpoints/sft_v2_cot_easy > models/checkpoints/sft_v2_cot_easy.log 2>&1 &
 ```
@@ -175,7 +168,7 @@ python scripts/generate.py --checkpoint <ckpt> --tokenizer-dir models/tokenizer_
 # --split val = 训练时同一口径的验证集（均匀分块 + 双端对齐文档边界），可直接比较泛化
 python scripts/evaluate_pretrain.py --checkpoint <ckpt> --tokenizer-dir models/tokenizer_v3 \
   --bin <bin> --split val --output models/checkpoints/ppl.json
-python scripts/eval_thinking.py --checkpoint <ckpt> --eval-jsonl dataset/sft/cot_eval_easy_zh.jsonl \
+python scripts/eval_thinking.py --checkpoint <ckpt> --eval-jsonl dataset/sft/cot_eval_easy_disjoint.jsonl \
   --n 60 --strategies plain,single,two-phase --repetition-penalty 1.0 --output models/checkpoints/eval_thinking.json
 ```
 
@@ -192,66 +185,47 @@ SFT/CoT：loss 与产物；思考模式 easy/hard 准确率（对照基座）
 样例：3 条输入/输出
 ```
 
-## 7. 已知坑（详见 references/troubleshooting.md）
+## 7. 已知坑
 
-- 词表 >65535 必须 uint32（否则 `OverflowError`）；`TokenBinDataset` 依赖 `.meta.json`。
-- 续训必须带 `--paths_last_checkpoint_path`；RNG 张量加载时会 `.cpu()` 修正。
-- `torch.compile` 只对固定形状（预训练）收益大；SFT 变长序列可能反复重编译。
-- 算术评测 `--repetition-penalty` 必须 1.0。
-- **优先用 `best.pt` 而不是 `final.pt`**：小模型 SFT/CoT 后期过拟合（实测 eval 1.611 → 1.740）。
-  训练器在 eval 创新低时写 `best.pt`（`--train_save_best False` 可关），下游训练/评测/发布都优先取它；
+**症状 → 原因 → 处置的完整清单见 `references/troubleshooting.md`**（OOM / uint16 溢出 / 续训 RNG /
+进程被杀 / 吞吐骤降 / 磁盘写满 / 指标异常）。这里只列两条属于"训练策略"而非"故障"的：
+
+- **优先用 `best.pt` 而不是 `final.pt`**：小模型 SFT/CoT 后期必然过拟合（实测 eval 1.611 → 1.740）。
+  训练器在 eval 创新低时写 `best.pt`（`--train_save_best False` 可关），下游训练/评测/发布都优先取它，
   只有确实不存在 `best.pt`（老产物）才回退 `final.pt`。
-- 长训练必须跑 `scripts/checkpoint_janitor.sh`；WSL 下注意 C 盘 vhdx 增长。
-- 长任务用 `setsid` 脱离工具进程组；用 `pgrep -af` 与日志校验存活。
+- 领域续训的 `--train_reset_step` 坑（会导致"几十秒训完"）见 §7.5。
 
-## 7.5 领域增量预训练（如新下载的行业/代码语料）
+## 7.5 领域续训与数据分布
 
-外部语料（parquet/jsonl）通常是**预训练语料**而不是指令数据，正确姿势是「增量预训练 → 再 SFT」，
-否则直接 SFT 会把模型训成续写器、破坏对话能力。
+**领域语料是预训练语料、不是指令数据**：正确姿势是「增量续训 → 再 SFT」；直接拿去 SFT 会把模型训成续写器。
 
-```bash
-# 1) parquet → jsonl（过滤 + 混入通用语料防遗忘 + token 估算）
-python scripts/parquet_to_jsonl.py   --src dataset/IndustryCorpus2_computer_programming_code_high   --out dataset/domain/code_corpus.jsonl   --min-chars 300 --max-chars 8000 --max-line-length 500 --min-quality 3.0   --mix-jsonl dataset/pretrain_t2t_mini.jsonl --mix-ratio 0.15 --mix-limit 200000
+三条必须遵守的抽样/配比规则（原理与实测证据见 **`references/data-distribution.md`**）：
 
-# 2) 建 bin（自动 uint16/uint32 + meta）
-python scripts/build_pretrain_bin.py build --corpus-jsonl dataset/domain/code_corpus.jsonl   --tokenizer-dir models/tokenizer_v3 --out-bin dataset/bins/code_domain.bin --max-lines 0
-
-# 3) 从现有基座增量续训（低 lr，1 epoch；混入语料已在步骤 1 完成）
-#    ⚠️ 必须让 RESET_STEP 生效（默认 auto：从 FALLBACK_CKPT 起步时自动 --train_reset_step True）
-OUT_DIR=models/checkpoints/pretrain_domain_code DATA_BIN=dataset/bins/code_domain.bin \
-TARGET_STEPS=<按预算换算> PRESET_ARGS="--model_emb_dim 512 --model_n_layers 10 --model_n_heads 8 \
-  --model_context_length 512 --train_batch_size 8 --train_learning_rate 1e-4 --train_warmup_steps 100 \
-  --train_eval_steps 1000 --train_save_steps 4000 --train_epochs 2 --train_torch_compile True" \
-FALLBACK_CKPT=models/checkpoints/pretrain_v2_full/final.pt \
-setsid nohup bash scripts/train_pretrain_resilient.sh > models/checkpoints/pretrain_domain_code.watchdog.log 2>&1 &
-
-# 4) 领域基座再跑一次 SFT/CoT（复用 §5 命令，--pretrain 指向新的 final.pt）
-```
-要点：混入通用语料 10–20% 防灾难性遗忘；lr 用预训练的 1/5~1/10；长文档被 ctx 切窗属正常；
-过滤 `quality_score`/`max_line_length` 可显著提纯；若目标是"思考模式"，数学语料（IndustryCorpus2_mathematics_statistics_high）
-比代码更适合，可从中抽取题目构造 CoT 指令题。
-
-**实测警告：混 15% 不够。** 本仓库真实跑过一轮 `lr=1e-4 / 1 epoch / mix 15%` 的代码领域续训（26,847 步 / 74 分钟）：
-领域 ppl 80.79 → **28.72（−64%）**，但通用 ppl 23.66 → **33.43（+41%）**，下游对话 SFT eval_loss
-2.7795 → 2.9087，样例里"你是谁"开始答非所问。**因此领域续训必须双口径验收**：
+1. **整文件均匀抽样**，禁止"读前 N 行"——语料按领域排序，取前缀只拿得到一个领域；
+2. **配比按字符/token**、均值用全文件扫描后的精确值——历史上的"混 15%"实际只有 **1.18%**；
+3. **长文档先按结构切块**再入池——中位 28,651 字符的论文一篇要占 25–35 个窗口。
 
 ```bash
-TAG=domain bash scripts/run_domain_compare.sh   # 领域 bin + 通用 bin 各跑一次同切分 ppl，并刷新 TRAINING_REPORT.md
+# 数据源、规模、生成/重配命令  → dataset/README.md（唯一详述处）
+# 训练命令：基座 / 领域续训(70:30) / 退火档(50:50) / 双口径验收 → references/data-distribution.md §8
+python scripts/audit_dataset.py     # 开训前完整体检（别加 --quick）；有 BLOCKER 返回 1
 ```
 
-验收标准（缺一不可）：领域 ppl 明显下降 **且** 通用 ppl 上升不超过 ~5%。不达标就降 lr（1e-5~3e-5）、
-提高混料比（30%+）或减少步数；宁可领域增益小一点，也不要破坏基座。
+**验收（缺一不可）**：领域 ppl 明显下降 **且** 通用 ppl 上升 ≤5%（`bash scripts/run_domain_compare.sh`）。
+反例：`lr=1e-4 / 1 epoch / 名义 mix 15%` 的代码续训 → 领域 ppl −64%，但通用 ppl **+41%**，
+下游对话 SFT eval_loss 2.78→2.91。不达标就降 lr（1e-5~3e-5）、提高混料比（≥30%）或减少步数。
 
-**增量续训最大的坑（真实踩过，务必检查）**：`--train_max_steps` 是**绝对步数**。
-从 211000 步的基座"再训 26847 步"如果直接传 `--train_max_steps 26847`，trainer 加载后
-`step=211000 ≥ max_steps` 会**立刻判定训练完成**（几十秒产出 final.pt，实际一步没训）；
-即使不退出，`cosine` 调度与 `epoch skip` 也会因为步数基数过大而失效。
-正确做法是加 `--train_reset_step True`（`train_pretrain_resilient.sh` 的 `RESET_STEP=auto` 已默认处理：
-从 `FALLBACK_CKPT` 起步时归零，从本 run 自己的 checkpoint 恢复时保留步数）。
-启动后**务必核对**日志里出现 `reset_step=True：步数 211000 -> 0`，且第一条 loss 在合理区间。
+**最大的坑**：`--train_max_steps` 是**绝对步数**。从 211k 步基座"再训 26,847 步"若直接传
+`--train_max_steps 26847`，加载后 `step ≥ max_steps` 会**立刻判定训完**（几十秒产出 final.pt，实际一步没训）。
+必须 `--train_reset_step True`（`train_pretrain_resilient.sh` 的 `RESET_STEP=auto` 已默认处理）；
+启动后核对日志出现 `reset_step=True：步数 211000 -> 0`。
 
 ## 8. 参考
 
-- `references/training-recipes.md`：环境预设矩阵、吞吐表、预算↔tokens 换算、多卡公式、CPU 实测。
-- `references/troubleshooting.md`：OOM/速度/续训/数据/磁盘/指标异常处置。
-- `minigpt/README.md`：指标面板、看板、思考模式与实测结果。
+| 想知道什么 | 看哪里 |
+|---|---|
+| 环境预设矩阵、吞吐、预算↔tokens、多卡公式 | `references/training-recipes.md` |
+| 症状→原因→处置（OOM/慢/续训/磁盘/指标） | `references/troubleshooting.md` |
+| 数据分布的原理、实测证据、配比口径、验收 | `references/data-distribution.md` |
+| **各阶段数据源、规模、生成命令** | `../../dataset/README.md` |
+| 包 API、配置项、训练产物、指标面板 | `../../minigpt/README.md` |

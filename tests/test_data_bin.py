@@ -170,3 +170,29 @@ def test_validate_bin_tokenizer_missing_meta(tmp_path, tiny_tokenizer):
     out.write_bytes(b"\x01\x00\x02\x00")
     info = validate_bin_tokenizer(str(out), tiny_tokenizer)
     assert info["checked"] is False
+
+
+def test_tokenize_skips_malformed_lines(tmp_path, tiny_tokenizer):
+    """脏行必须**跳过并计数**，不能让一行坏数据毁掉整轮构建。
+
+    真实事故：上游 `pretrain_t2t.jsonl` 第 8,441,338 行开引号被 0x02 替换，
+    旧实现在跑满 65 分钟、写完 3.15GB 之后抛 JSONDecodeError，连 meta 都没落盘。
+    """
+    import json
+    from minigpt.data.pretrain_dataset import load_bin_meta, tokenize_jsonl_to_bin
+
+    src = tmp_path / "corpus.jsonl"
+    with open(src, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"text": "正常的一行文本" * 10}, ensure_ascii=False) + "\n")
+        f.write('{"text": \x02坏行：开引号被控制符替换' + "x" * 50 + "\n")   # 非法 JSON
+        f.write("\n")                                                      # 空行
+        f.write(json.dumps({"text": "第三行也正常" * 10}, ensure_ascii=False) + "\n")
+    out = tmp_path / "corpus.bin"
+    lines, tokens, dtype = tokenize_jsonl_to_bin(str(src), str(out), tiny_tokenizer)
+
+    assert tokens > 0 and out.exists()
+    meta, _ = load_bin_meta(str(out))
+    assert meta["bad_lines"] == 1, f"坏行数应记为 1，实际 {meta.get('bad_lines')}"
+    # 行号仍然连续计数（跳过的行不占行号空洞），且坏行没有产 token
+    assert lines == 4
+    assert meta["tokens"] == tokens

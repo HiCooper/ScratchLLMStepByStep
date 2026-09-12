@@ -1,6 +1,8 @@
 #!/bin/bash
 # 从 ModelScope（魔搭）下载本教程所需数据，避免 HuggingFace 网络问题。
-#   - pretrain_t2t_mini.jsonl (~1.2GB)  中英混合文本，既用于训练分词器，也用于预训练
+#   - pretrain_t2t.jsonl (~7.9GB)  中英混合文本（846.9 万行 / 3.24G 字符 ≈ 16.5 亿 tokens），
+#     既用于训练分词器，也用于预训练。旧的 mini 版（1.2GB / 2.475 亿 tokens）已删除：
+#     它是全量的真子集，留着只会让人不知道该训哪一份。
 # 数据源：https://www.modelscope.cn/datasets/gongjy/minimind_dataset
 #
 # 用法：bash scripts/download_data.sh [目标目录]   （默认下载到 ./dataset）
@@ -10,7 +12,7 @@ cd "$(dirname "$0")/.." || exit 1
 
 DATASET="gongjy/minimind_dataset"
 TARGET_DIR="${1:-dataset}"
-FILES=("pretrain_t2t_mini.jsonl")
+FILES=("pretrain_t2t.jsonl")
 
 mkdir -p "$TARGET_DIR"
 
@@ -29,7 +31,7 @@ fi
 cat <<EOF
 
 下载完成，数据位于 $TARGET_DIR/。后续步骤：
-  1) 分词器：对 $TARGET_DIR/pretrain_t2t_mini.jsonl 取子集训练（见 scripts/train_tokenizer.py，加 --max-lines 控制规模）
-  2) 预训练：对 $TARGET_DIR/pretrain_t2t_mini.jsonl 执行 texts_to_bin（content_key="text"）
+  1) 分词器：对 $TARGET_DIR/pretrain_t2t.jsonl 取子集训练（见 scripts/train_tokenizer.py，加 --max-lines 控制规模）
+  2) 预训练：对 $TARGET_DIR/pretrain_t2t.jsonl 执行 build_pretrain_bin.py（content_key="text"）
      生成 .bin 后即可预训练（见 scripts/validate_pretrain.py）
 EOF

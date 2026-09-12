@@ -74,7 +74,7 @@ Chinchilla 参考 = 10~20 × 参数量
 本机参考（512/10/8, compile, bs8, ctx512 ≈ 4096 tok/步, 0.17s/步）：
 - 1 小时 ≈ 21k 步 ≈ **8,650 万 tokens**
 - 10 小时 ≈ 21 万步 ≈ **8.6 亿 tokens**（≈18×参数）
-- 全量语料 `pretrain_v3_full.bin` = **2.475 亿 tokens**（127 万行），1 epoch ≈ 6.0 万步 ≈ 2.8 小时
+- 全量语料 `pretrain_v4_full.bin` = **2.475 亿 tokens**（127 万行），1 epoch ≈ 6.0 万步 ≈ 2.8 小时
 
 ## 5. 超参经验值
 
@@ -102,19 +102,15 @@ Chinchilla 参考 = 10~20 × 参数量
 - 换 tokenizer：只改 `--data_tokenizer_dir`，模型词表自动跟随；**词表 >65535 必须 uint32**。
 - 语料顺序即切片顺序；混合多来源请先 shuffle 行顺序。
 
-## 8. 评测协议（可复现）
+## 8. 评测协议（唯一详述处）
 
 ```bash
-# 默认 --split val：与训练同一口径的验证集（均匀分块 + 双端对齐文档边界）
-# ⚠️ 不要用 --max-rows 取 .bin 最前面的窗口来评估参与过训练的 bin：那是训练集 loss，
-#    而且本语料按领域排序（头=中文创作、尾=英文选择题），头尾 ppl 实测可差 3 倍以上。
-python scripts/evaluate_pretrain.py --checkpoint <ckpt> --bin dataset/bins/pretrain_v3_full.bin --split val
-python scripts/eval_thinking.py --checkpoint <ckpt> --eval-jsonl dataset/sft/cot_eval_easy_zh.jsonl \
+# 语言建模：--split val 与训练同一口径（均匀分块 + 双端对齐文档边界）
+python scripts/evaluate_pretrain.py --checkpoint <ckpt> --bin dataset/bins/pretrain_v5_full.bin --split val
+# 思考模式：算术评测必须 --repetition-penalty 1.0（否则惩罚重复的数字）
+python scripts/eval_thinking.py --checkpoint <ckpt> --eval-jsonl dataset/sft/cot_eval_easy_disjoint.jsonl \
   --n 60 --strategies plain,single,two-phase --repetition-penalty 1.0
 ```
-
-
-## 评测协议（v2，2025-09 修订）
 
 | 口径 | 命令 | 用途 |
 |---|---|---|

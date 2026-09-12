@@ -53,10 +53,10 @@ class ModelConfig:
 class DataConfig:
     """语料与分词产物。"""
     tokenizer_dir: str = _root_join("models", "tokenizer_v3")  # 32k 中文 BPE（生产基线）
-    corpus_jsonl: str = _root_join("dataset", "pretrain_t2t_mini.jsonl")
+    corpus_jsonl: str = _root_join("dataset", "pretrain_t2t.jsonl")
     content_key: str = "text"
     max_lines: int = 0              # 语料取前 N 行（0=全量；CPU/快速验证请显式传小值）
-    tokenized_bin: str = _root_join("dataset", "bins", "pretrain_v3_full.bin")
+    tokenized_bin: str = _root_join("dataset", "bins", "pretrain_v5_full.bin")
     bin_meta: str = ""              # 空 => tokenized_bin 同目录同名前缀 .meta.json
     eval_ratio: float = 0.002       # 验证集比例（均匀分块 + 双端对齐文档边界）
     eval_blocks: int = 32           # 验证集分成多少块（块越多越能代表整体语料分布；1=只取一段）

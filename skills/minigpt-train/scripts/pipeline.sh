@@ -138,13 +138,13 @@ if [ "$MODE" = "--smoke" ]; then
   CMD_BUILD="python3 scripts/build_pretrain_bin.py build --corpus-jsonl /tmp/smoke_corpus.jsonl --tokenizer-dir models/tokenizer_v3 --out-bin $SMOKE_BIN"
   CMD_TRAIN="python3 -u -m minigpt.train.pretrainer --data_tokenizer_dir models/tokenizer_v3 --data_tokenized_bin $SMOKE_BIN --data_eval_ratio 0.02 $SMOKE_TRAIN --paths_output_dir models/checkpoints/smoke_skill"
   if [ "$DRY_RUN" = "1" ]; then
-    log "[dry-run] head -n 2000 dataset/pretrain_t2t_mini.jsonl > /tmp/smoke_corpus.jsonl"
+    log "[dry-run] head -n 2000 dataset/pretrain_t2t.jsonl > /tmp/smoke_corpus.jsonl"
     echo "  $CMD_BUILD"; echo "  $CMD_TRAIN"
     exit 0
   fi
   if [ ! -f "$SMOKE_BIN" ]; then
     log "构建冒烟语料（2000 行）"
-    head -n 2000 dataset/pretrain_t2t_mini.jsonl > /tmp/smoke_corpus.jsonl
+    head -n 2000 dataset/pretrain_t2t.jsonl > /tmp/smoke_corpus.jsonl
     eval "$CMD_BUILD" || exit 1
   fi
   if [ "$PRESET" != "cpu" ]; then
@@ -168,13 +168,13 @@ if [ -z "$CORPUS_LINES" ]; then
   if [ "$PRESET" = "cpu" ]; then CORPUS_LINES=20000; else CORPUS_LINES=0; fi
 fi
 if [ "$PRESET" = "cpu" ]; then
-  FULL_BIN="dataset/bins/pretrain_v3_20k.bin"
+  FULL_BIN="dataset/bins/pretrain_cpu20k.bin"
   OUT_DIR="models/checkpoints/pretrain_cpu_skill"
 elif [ "$PRESET" = "multi-gpu" ]; then
-  FULL_BIN="dataset/bins/pretrain_v3_full.bin"
+  FULL_BIN="dataset/bins/pretrain_v4_full.bin"
   OUT_DIR="models/checkpoints/pretrain_ddp"
 else
-  FULL_BIN="dataset/bins/pretrain_v3_full.bin"
+  FULL_BIN="dataset/bins/pretrain_v4_full.bin"
   OUT_DIR="models/checkpoints/pretrain_${PRESET}"
 fi
 LOG_FILE="$OUT_DIR.log"
@@ -196,7 +196,7 @@ fi
 if [ "$DRY_RUN" = "1" ]; then
   cat <<EOF
 [dry-run] 预设=$PRESET nproc=$NPROC 目标步数=$STEPS
-  1) 数据：python3 scripts/build_pretrain_bin.py build --corpus-jsonl dataset/pretrain_t2t_mini.jsonl --tokenizer-dir models/tokenizer_v3 --out-bin $FULL_BIN --max-lines $CORPUS_LINES
+  1) 数据：python3 scripts/build_pretrain_bin.py build --corpus-jsonl dataset/pretrain_t2t.jsonl --tokenizer-dir models/tokenizer_v3 --out-bin $FULL_BIN --max-lines $CORPUS_LINES
   2) 训练：OUT_DIR=$OUT_DIR LOG=$LOG_FILE DATA_BIN=$FULL_BIN NPROC=$NPROC TARGET_STEPS=$STEPS PRESET_ARGS="$PRESET_ARGS" setsid nohup bash scripts/train_pretrain_resilient.sh > $OUT_DIR.watchdog.log 2>&1 &
   3) 守护：setsid nohup bash scripts/checkpoint_janitor.sh 60 2 120 > /tmp/janitor.log 2>&1 &
   4) 下游：setsid nohup bash scripts/wait_and_run_downstream.sh > $OUT_DIR.downstream.log 2>&1 &
@@ -207,7 +207,7 @@ fi
 
 if [ ! -f "$FULL_BIN" ]; then
   log "==== 构建语料 .bin（max-lines=$CORPUS_LINES）===="
-  python3 scripts/build_pretrain_bin.py build --corpus-jsonl dataset/pretrain_t2t_mini.jsonl \
+  python3 scripts/build_pretrain_bin.py build --corpus-jsonl dataset/pretrain_t2t.jsonl \
     --tokenizer-dir models/tokenizer_v3 --out-bin "$FULL_BIN" --max-lines "$CORPUS_LINES" || exit 1
 else
   log "语料已存在：$FULL_BIN"

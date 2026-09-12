@@ -2,7 +2,7 @@
 
 把 notebook 里的训练逻辑抽成可复用脚本，便于命令行复现：
     python scripts/train_tokenizer.py \
-        --data dataset/pretrain_t2t_mini.jsonl \
+        --data dataset/pretrain_t2t.jsonl \
         --output models/tokenizer_v3 \
         --vocab-size 32000
 

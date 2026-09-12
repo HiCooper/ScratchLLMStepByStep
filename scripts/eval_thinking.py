@@ -2,7 +2,7 @@
 
 用法：
     python scripts/eval_thinking.py --checkpoint models/checkpoints/sft_cot_v1/final.pt \
-        --tokenizer-dir models/tokenizer_v3 --eval-jsonl dataset/sft/cot_eval_zh.jsonl \
+        --tokenizer-dir models/tokenizer_v3 --eval-jsonl dataset/sft/cot_eval_hard_disjoint.jsonl \
         --n 60 [--temperature 0] [--thinking-max-tokens 120] [--output result.json]
 """
 import argparse
@@ -41,6 +41,31 @@ def norm(x):
         return str(x)
 
 
+def bucket_of(question: str) -> str:
+    """把题目按**规模+题型**分桶，用于分档报告准确率。
+
+    为什么必须分档：单一平均准确率会把"简单题全对、难题全错"平均成一个看不出问题的数字。
+    47.9M 参数在多位数乘加上是**容量墙**（继续堆同分布数据无用），只有分档才看得出来。
+    这是**报告用**的启发式（判分仍用数值精确匹配），规则与 `build_cot_sft.py` 的生成器对齐。
+    """
+    digits = [int(x) for x in re.findall(r"\d+", question)]
+    scale = "big" if (max(digits) if digits else 0) >= 100 else "small"
+    if any(k in question for k in ("苹果", "平均", "剩下", "原有", "多少元", "多少本")):
+        return f"word_{scale}"
+    if "×" in question or "乘" in question:
+        return f"mul_{scale}"
+    if "÷" in question or "除" in question:
+        return f"div_{scale}"
+    ops = sum(question.count(op) for op in "+-")
+    if ops >= 2:
+        return f"mixed_{scale}"
+    if "-" in question or "减" in question:
+        return f"sub_{scale}"
+    if "+" in question or "加" in question:
+        return f"add_{scale}"
+    return "other"
+
+
 def plain_generate(model, tokenizer, question, device, max_new_tokens, temperature, seed,
                    repetition_penalty=1.0):
     prompt = tokenizer.apply_chat_template([{"role": "user", "content": question}],
@@ -59,7 +84,7 @@ def main():
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--tokenizer-dir", default="models/tokenizer_v3")
     ap.add_argument("--n-heads", type=int, default=None, help="覆盖 config-less checkpoint 反推出的注意力头数（n_heads 无法从权重形状反推；有 config 时以 config 为准）")
-    ap.add_argument("--eval-jsonl", default="dataset/sft/cot_eval_zh.jsonl")
+    ap.add_argument("--eval-jsonl", default="dataset/sft/cot_eval_hard_disjoint.jsonl")
     ap.add_argument("--n", type=int, default=60)
     ap.add_argument("--max-new-tokens", type=int, default=80)
     ap.add_argument("--thinking-max-tokens", type=int, default=120)
@@ -89,11 +114,15 @@ def main():
 
     strategies = [s.strip() for s in args.strategies.split(",") if s.strip()]
     stats = {s: 0 for s in strategies}
+    buckets = {}                      # 桶 -> {"n": 题数, "<策略>": 正确数}
     details = []
     t0 = time.time()
     for i, row in enumerate(rows):
         q = row["instruction"]
         gold = extract_answer(row["output"])
+        bkey = bucket_of(q)
+        bslot = buckets.setdefault(bkey, {"n": 0, **{s: 0 for s in strategies}})
+        bslot["n"] += 1
         plain = plain_generate(model, tokenizer, q, device, args.max_new_tokens,
                                args.temperature, args.seed + i, args.repetition_penalty)
         p_pred = extract_answer(plain)
@@ -101,6 +130,7 @@ def main():
                       "plain_ok": norm(p_pred) == norm(gold)}
         if "plain" in strategies:
             stats["plain"] += row_detail["plain_ok"]
+            bslot["plain"] += row_detail["plain_ok"]
         for strat in [s for s in strategies if s != "plain"]:
             res = generate_with_thinking(
                 model, tokenizer, q, strategy=strat,
@@ -112,6 +142,7 @@ def main():
             pred = extract_answer(res["answer"])
             ok = norm(pred) == norm(gold)
             stats[strat] += ok
+            bslot[strat] += ok
             row_detail[f"{strat}_pred"] = pred
             row_detail[f"{strat}_ok"] = ok
             row_detail[f"{strat}_thinking"] = res["thinking"][:120]
@@ -129,8 +160,22 @@ def main():
         "temperature": args.temperature,
         "seconds": round(time.time() - t0, 1),
         "checkpoint": args.checkpoint,
+        # 分档准确率：单一平均会掩盖"简单题全对、难题全错"（容量墙）
+        "by_difficulty": {
+            b: {"n": v["n"], **{k: round(v[k] / max(1, v["n"]), 3)
+                                for k in strategies if k in v}}
+            for b, v in sorted(buckets.items(), key=lambda kv: -kv[1]["n"])
+        },
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    print("\n--- 分档准确率（按题量排序）---")
+    print(f"{'档位':<14}{'题数':>6}  " + "  ".join(f"{k:>10}" for k in strategies))
+    for b, v in sorted(buckets.items(), key=lambda kv: -kv[1]["n"]):
+        accs = "  ".join(f"{v[k]/max(1, v['n']):>10.1%}" for k in strategies if k in v)
+        flag = ""
+        if v["n"] >= 5 and all(v[k] / max(1, v["n"]) < 0.5 for k in strategies if k in v):
+            flag = "   ← 全档低于 50%，优先怀疑容量/数据分布，而不是再加步数"
+        print(f"{b:<14}{v['n']:>6}  {accs}{flag}")
     print("\n--- 样例（前 3 条）---")
     for d in details[:3]:
         extra = " ".join(f"{k}={d.get(k)}" for k in d if k.endswith("_pred"))

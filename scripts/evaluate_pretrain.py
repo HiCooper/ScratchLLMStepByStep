@@ -4,7 +4,7 @@
     python scripts/evaluate_pretrain.py \
         --checkpoint models/checkpoints/pretrain_v2_full/final.pt \
         --tokenizer-dir models/tokenizer_v3 \
-        --bin dataset/bins/pretrain_v3_full.bin \
+        --bin dataset/bins/pretrain_v4_full.bin \
         --split val --batch-size 8 --output metrics_eval.json
 
 口径说明（重要）

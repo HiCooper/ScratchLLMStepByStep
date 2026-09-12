@@ -198,29 +198,67 @@ def _resolve_meta(bin_path, meta_path):
         return meta_path
     return os.path.splitext(bin_path)[0] + ".meta.json"
 
+def _iter_corpus_lines(input_path, byte_range=None):
+    """按行产出语料内容。
+
+    `byte_range=(start, end)` 时只产出**起始偏移落在该区间**的行（供多进程并行切分），
+    边界必须对齐到行首——见 `scripts/build_pretrain_bin.py:_line_aligned_bounds`。
+    用二进制读 + decode：文本模式的 `seek()` 只接受 `tell()` 返回的 opaque cookie，
+    不能按字节偏移定位。
+    """
+    if byte_range is None:
+        with open(input_path, encoding="utf-8") as f:
+            for line in f:
+                yield line
+        return
+    with open(input_path, "rb") as f:
+        f.seek(byte_range[0])
+        while f.tell() < byte_range[1]:
+            raw = f.readline()
+            if not raw:
+                return
+            yield raw.decode("utf-8")
+
+
 def tokenize_jsonl_to_bin(input_path, output_path, tokenizer, content_key="text",
-                          max_lines=0, dtype=None, meta_path="", write_every=200000):
+                          max_lines=0, dtype=None, meta_path="", write_every=200000,
+                          byte_range=None):
     """把 jsonl 语料（按行 {content_key: ...}）序列化为二进制 token 流，并写出元数据。
 
     - 每条文本后追加 tokenizer.eos_token_id 作为文档结束符（无 BOS 的 tokenizer 不加前缀）；
     - 词表 >65535 时自动使用 uint32，否则默认 uint16（可用 dtype 显式指定）；
+    - **JSON 非法行跳过并计数**（写进 meta.bad_lines 并打印示例），不让一行坏数据毁掉整轮构建；
+    - `byte_range` 用于多进程并行切分（只处理起始偏移落在区间内的行）；
     - 返回 (lines, tokens, dtype)；同目录生成 .meta.json 供训练侧自动识别。
+
+    真实事故：上游语料 `pretrain_t2t.jsonl` 第 8,441,338 行的开引号被 0x02 控制符替换
+    （`{"text": \\x02A ball is thrown...`）。旧实现直接 `_json.loads` 抛异常，在跑满 65 分钟、
+    写完 3.15GB 之后崩溃，**连 meta 都没落盘**，整轮白跑。现在跳过该行并记数，
+    由 `scripts/audit_dataset.py`（非 --quick）在开训前就能报出 `JSON 非法 N`。
     """
     vocab_size = len(tokenizer)
     dtype = dtype or ("uint32" if vocab_size > 65535 else "uint16")
     eos_id = tokenizer.eos_token_id
-    n_lines, n_tokens, n_chunks = 0, 0, 0
+    n_lines, n_tokens, n_chunks, n_bad = 0, 0, 0, 0
+    bad_examples = []
     buf = []
     out_meta = _resolve_meta(output_path, meta_path)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(input_path, "r", encoding="utf-8") as reader, open(output_path, "wb") as writer:
-        while True:
-            line = reader.readline()
-            if not line:
-                break
+    with open(output_path, "wb") as writer:
+        for line in _iter_corpus_lines(input_path, byte_range):
             if max_lines and n_lines >= max_lines:
                 break
-            content = _json.loads(line).get(content_key)
+            if not line.strip():
+                n_lines += 1
+                continue
+            try:
+                content = _json.loads(line).get(content_key)
+            except _json.JSONDecodeError:
+                n_bad += 1
+                if len(bad_examples) < 3:
+                    bad_examples.append((n_lines + 1, line[:60].encode("unicode_escape").decode()))
+                n_lines += 1
+                continue
             if not content:
                 n_lines += 1
                 continue
@@ -240,10 +278,14 @@ def tokenize_jsonl_to_bin(input_path, output_path, tokenizer, content_key="text"
         "dtype": dtype, "lines": n_lines, "tokens": n_tokens,
         "vocab_size": vocab_size, "eos_id": eos_id,
         "content_key": content_key, "tokenizer": getattr(tokenizer, "name_or_path", ""),
+        "bad_lines": n_bad,
     }
     with open(out_meta, "w", encoding="utf-8") as f:
         _json.dump(meta, f, ensure_ascii=False, indent=2)
     print(f"[data] lines={n_lines} tokens={n_tokens} dtype={dtype} -> {output_path}")
+    if n_bad:
+        print(f"[data] ⚠️  跳过 {n_bad} 行 JSON 非法（示例：{bad_examples}）——"
+              f"上游语料有脏行，建议先用 scripts/audit_dataset.py 定位")
     print(f"[data] meta -> {out_meta}")
     return n_lines, n_tokens, dtype
 
@@ -350,7 +392,7 @@ def split_train_eval_blocks(ds, eval_ratio=0.002, max_eval=512, eos_id=None, n_b
     随机切就会让"文档前半在训练集、后半在验证集"。实测该切分下有相当比例的验证
     token 属于训练时见过的文档，eval_loss 偏乐观。
 
-    为什么也不能只取尾部连续块：本语料 `pretrain_t2t_mini.jsonl` 是**按领域排序**的，
+    为什么也不能只取尾部连续块：本语料 `pretrain_t2t.jsonl` 是**按领域排序**的，
     尾部整段是英文选择题、头部是中文创作/指令。实测同一 checkpoint
       head 前 64 窗 ppl=23.40  vs  尾部 64 窗 ppl=6.78
     取尾部会把"验证集"变成单一领域，测出来的不是整体质量，而且与 trainer 内部

@@ -9,7 +9,7 @@
 #   OUT_DIR        产物目录            (models/checkpoints/pretrain_v2_full)
 #   LOG            训练日志            ($OUT_DIR.log)
 #   FALLBACK_CKPT  无 checkpoint 时的起点 (models/checkpoints/pretrain_v1_512/final.pt，可为空)
-#   DATA_BIN       语料 .bin           (dataset/bins/pretrain_v3_full.bin)
+#   DATA_BIN       语料 .bin           (dataset/bins/pretrain_v4_full.bin)
 #   TOKENIZER_DIR  分词器目录          (models/tokenizer_v3)
 #   PRESET_ARGS    模型/训练超参串      (见下)
 #   TARGET_STEPS   目标优化步数         (211000)
@@ -26,7 +26,7 @@ cd "$(dirname "$0")/.."
 OUT_DIR="${OUT_DIR:-models/checkpoints/pretrain_v2_full}"
 LOG="${LOG:-$OUT_DIR.log}"
 FALLBACK_CKPT="${FALLBACK_CKPT:-models/checkpoints/pretrain_v1_512/final.pt}"
-DATA_BIN="${DATA_BIN:-dataset/bins/pretrain_v3_full.bin}"
+DATA_BIN="${DATA_BIN:-dataset/bins/pretrain_v4_full.bin}"
 TOKENIZER_DIR="${TOKENIZER_DIR:-models/tokenizer_v3}"
 TARGET_STEPS="${TARGET_STEPS:-211000}"
 NPROC="${NPROC:-1}"

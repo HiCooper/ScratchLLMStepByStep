@@ -27,7 +27,81 @@ minigpt/
     └── pretrainer_single.py # 单卡教学版训练器（notebook 09/10 使用）
 ```
 
-## 1. 快速开始
+## 1. 模型架构
+
+decoder-only Transformer，**pre-norm + RoPE + 输入输出嵌入共享**（GPT-2 与 LLaMA 的混合体）。
+默认 `512/10/8 + ctx512 + 32k 词表 = 47.89M 参数`，实现在 `model/attention.py` + `model/transformer.py`。
+
+```
+tokens (B, S)
+  │
+  └─ token_emb ─ dropout ─┐
+                          │   pos_cis[position_ids]  ← RoPE 旋转因子（绝对位置）
+       ┌──────────────────┴─────────────────────────────────┐
+       │  × n_layers (10)                                   │
+       │    x = x + Wo(Attn(Norm1(x)))  ← 因果注意力 + 残差  │
+       │    x = x + FFN(Norm2(x))       ← GELU 4d / SwiGLU  │
+       └──────────────────┬─────────────────────────────────┘
+  ┌───────────────────────┘
+  └─ final_norm ─ out_head ─ logits (B, S, V=32000)
+       └─ out_head 与 token_emb 共享同一份权重（tie_word_embeddings=True）
+```
+
+### 1.1 参数量分布（默认 512/10/8，实测）
+
+| 组件 | 形状 / 取值 | 参数量 | 占比 |
+|---|---|---|---|
+| `token_emb` | 32000 × 512 | 16,384,000 | **34.2%** |
+| `decode_layers` × 10 | 每层 3,150,848 | 31,508,480 | 65.8% |
+| ↳ `atten`（Wq/Wk/Wv/Wo + Wo.bias） | 4×512² + 512 | 1,049,088 | 2.2% |
+| ↳ `ffn`（GELU，中间维 2048） | 2×512·2048 + 2048 + 512 | 2,099,712 | 4.4% |
+| ↳ `layernorm1/2`（scale + shift） | 2 × 2×512 | 2,048 | ~0% |
+| `final_norm` | 2×512 | 1,024 | ~0% |
+| `out_head` | 与 `token_emb` 共享存储 | 0（复用） | — |
+| **合计** | | **47,893,504（47.89M）** | |
+
+`d_model=512, n_heads=8 → head_dim=64`（RoPE 按相邻两维配对，故 head_dim 必须为偶数）；
+`drop_rate` 默认 **0.0**（预训练与 SFT 预设都不开，需要正则化时再显式调大）。
+参数量估算公式只有一份实现：`minigpt.config.estimate_params`。
+
+### 1.2 结构细节（与主流实现的对齐点）
+
+| 位置 | 做法 | 说明 |
+|---|---|---|
+| 归一化 | **pre-norm** `x + 子层(Norm(x))`，末端 `final_norm` | 默认 LayerNorm；`norm_type=rmsnorm` 可切 |
+| 位置编码 | **RoPE**（`rope_theta=10000`）只作用于 Q/K，按**绝对位置**取 | 增量推理只取当前 token 的位置，不重置 |
+| 因果掩码 | 上三角 `-inf` 的加性掩码直接加到得分上 | 判据是"**本次前向有没有 past_kv**"：prefill 也必须加因果掩码，否则整段 prompt 被双向处理并污染 KV cache |
+| KV cache | 缓存沿 seq 维 `cat`，增量步只送最新 1 个 token | 与全量前向数值一致（实测 max\|diff\| = 9e-8） |
+| padding 掩码 | `(mask==0) × finfo.min` 加到得分；长度必须 = 已缓存 + 本步 | 无 cache 时输入窗口与掩码**都取尾部** |
+| 前馈 | 默认 GELU + 4d（2048）；`use_swiglu` 时 8/3·d 对齐 64 | SwiGLU 总参数与 GELU 基本持平 |
+| bias | QKV 无 bias；`Wo` 与 GELU-FFN **有** bias；`out_head` 无 bias | |
+| 初始化 | `N(0, 0.02)`；残差出口（`Wo`、FFN 末投影）再乘 `1/sqrt(2·n_layers)` | 修好之前 `nn.Embedding` 落在 N(0,1)，首步 loss 从应有的 ~10.4 变成 ~397 |
+| 采样 | temperature → top-k → top-p → 重复惩罚；`eos_token_id` 可传**列表** | chat 模型需同时接受 `<|im_end|>` 与 `<|endoftext|>` |
+
+### 1.3 架构开关（改结构即与旧 checkpoint 不兼容；checkpoint 自带 `config`，加载时自动对齐）
+
+| 开关 | 默认 | 打开后 |
+|---|---|---|
+| `tie_word_embeddings` | **True** | 输入/输出共享权重；32k 词表下省 16.4M 参数（34%） |
+| `use_swiglu` | False | SwiGLU 门控，中间维 8/3·d 对齐 64（LLaMA/Mistral/Qwen 主流） |
+| `norm_type` | `layernorm` | `rmsnorm`：省均值项与 shift，参数更少 |
+| `qkv_merged` | False | 单次矩阵乘产出 3·d |
+| `ffn_hidden_dim` | `0`（自动） | 手动指定前馈中间维 |
+| `lm_head_bias` | False | 输出头加 bias |
+| `rope_theta` | `10000` | 换 RoPE 基频（**注意：只有基频，没有 rope_scaling**） |
+| `flash_attn` | False | FlashAttention-2，**仅 Ampere(sm_80)+**；RTX 20 系（Turing）必须 False |
+| `use_checkpoint` | False | FFN 激活重计算（注意力部分未覆盖） |
+
+### 1.4 已知取舍（改架构时的候选方向）
+
+- **无 GQA/MQA**：KV cache 与头数等量，长上下文推理显存偏大。
+- **注意力未走 SDPA**：`q @ k.T` + softmax 会物化 (B,H,S,S) 得分矩阵——b8/h8/ctx512/fp16 单层 ≈ 33.5MB，
+  10 层 ≈ 335MB；ctx1024 预设下单层 ≈ 200MB。数值等价的 `F.scaled_dot_product_attention` 替换已验证
+  （训练/padding/KV-cache 三条路径 max\|diff\| ≈ 5e-7），尚未切换。
+- **RoPE 用复数实现**（`view_as_complex`）：torchinductor 不为复数算子生成代码，`torch.compile` 下这段会回退。
+- **前向里有一次 D2H 同步**：`position_ids.max().item()` 造成 1 个 graph break（每步一次）。
+
+## 2. 快速开始
 
 ```bash
 python3 -m minigpt.train.pretrainer --paths_output_dir models/checkpoints/pretrain_v3 \
@@ -42,22 +116,22 @@ python3 -m minigpt.train.sft_trainer \
 python scripts/generate.py --checkpoint models/checkpoints/sft_v3_chat/final.pt \
     --tokenizer-dir models/tokenizer_v3 --chat --prompt "什么是AI？"
 python scripts/evaluate_pretrain.py --checkpoint models/checkpoints/pretrain_v3/final.pt \
-    --tokenizer-dir models/tokenizer_v3 --bin dataset/bins/pretrain_v3_full.bin --split val
+    --tokenizer-dir models/tokenizer_v3 --bin dataset/bins/pretrain_v4_full.bin --split val
 ```
 
-## 2. 配置
+## 3. 配置
 
 | dataclass | 关键字段 |
 |---|---|
 | `ModelConfig` | `emb_dim / n_layers / n_heads / context_length / vocab_size(0=由 tokenizer 推导) / drop_rate / qkv_bias / qkv_merged / flash_attn / tie_word_embeddings / use_swiglu / use_checkpoint / norm_type / ffn_hidden_dim / lm_head_bias / rope_theta` |
 | `DataConfig` | `tokenizer_dir / corpus_jsonl / content_key / max_lines / tokenized_bin / bin_meta / eval_ratio / eval_blocks` |
-| `TrainConfig` | `epochs / learning_rate / batch_size / weight_decay / grad_accumulation_steps / max_steps / reset_step / extra_steps / warmup_steps / eval_steps / save_steps / save_best / grad_clip / mixed_precision_dtype / seed / num_workers / torch_compile / ddp_timeout_seconds / deterministic_cudnn` + 指标项（§4） |
+| `TrainConfig` | `epochs / learning_rate / batch_size / weight_decay / grad_accumulation_steps / max_steps / reset_step / extra_steps / warmup_steps / eval_steps / save_steps / save_best / grad_clip / mixed_precision_dtype / seed / num_workers / torch_compile / ddp_timeout_seconds / deterministic_cudnn` + 指标项（§5） |
 | `PathConfig` | `output_dir / last_checkpoint_path / sft_dataset` |
 
 扁平覆盖：`--model_emb_dim 512 --train_batch_size 8 --paths_output_dir ...`；布尔必须带值（`True/False/1/0/yes/no`）。
 运行结束把完整配置写入 `output_dir/config.json`，可用 `--config-file <该文件>` 整份读回（CLI 优先级更高）。
 
-## 3. 训练产物
+## 4. 训练产物
 
 ```
 output_dir/
@@ -65,7 +139,7 @@ output_dir/
 ├── checkpoint-{step}.pth   # 周期存档：model/optimizer/scaler/RNG/config
 ├── best.pt                 # eval_loss 历史最优（--train_save_best False 可关；下游/评测优先用它）
 ├── final.pt                # 最终存档（同样含 config，可直接推理）
-├── tensorboard/            # 指标事件（§4）
+├── tensorboard/            # 指标事件（§5）
 ├── metrics.json            # 最终指标 + data_split（评估口径）+ bin_meta
 └── sample.txt              # 训练后采样
 ```
@@ -77,7 +151,7 @@ output_dir/
 > 所以下游训练/评测/发布**优先用 `best.pt`**。每个存档含优化器+RNG（单文件 ~585MB），用
 > `scripts/checkpoint_janitor.sh` 控盘；写入是原子的（tmp→fsync→rename），中断不会破坏上一个可用存档。
 
-## 4. 训练过程指标（TensorBoard）
+## 5. 训练过程指标（TensorBoard）
 
 ```bash
 tensorboard --logdir models/checkpoints/pretrain_v3/tensorboard --port 6006   # http://localhost:6006
@@ -101,7 +175,7 @@ projector_max_tokens / log_attention_every / log_graph / log_samples_every / sam
   （绕开 torch 2.13 + tensorboard 2.21 下 `add_embedding` 静默失效）。
 - 默认间隔下对吞吐影响 < 2%；追极致吞吐把 `log_hist_every` 调大或设 0。
 
-## 5. 推理与评估
+## 6. 推理与评估
 
 ```bash
 # 采样参数：do_sample / temperature / top_k / top_p / repetition_penalty / seed
@@ -123,12 +197,10 @@ python scripts/generate.py --checkpoint <ckpt> --tokenizer-dir models/tokenizer_
 python scripts/evaluate_pretrain.py --checkpoint <ckpt> --bin <bin> \
     --tokenizer-dir models/tokenizer_v3 --batch-size 8 --split val --output metrics_eval.json
 ```
-> **口径要点**：`--split val`（默认）= 均匀分块 + 双端对齐文档边界的留出集，与训练时 `split_train_eval_blocks`
-> 同一口径，切分范围记录在输出 `data_split` 里，可跨 checkpoint 比较。
-> ⚠️ `--split all --max-rows N` 取的是 `.bin` **最前面**的窗口：对参与过训练的 bin 而言那是训练集 loss，
-> 且本语料按领域排序，头/尾 ppl 实测可差 3 倍以上，不同 N 之间也不可比。
+> **口径要点**（`--split val` 的定义、为什么禁止 `--split all --max-rows`、实测差异表）见
+> `../skills/minigpt-train/references/training-recipes.md §8`（唯一详述处）。
 
-## 6. 思考模式（CoT）
+## 7. 思考模式（CoT）
 
 "思考模式"不是模型里的开关，而是**数据 + 损失掩码 + 推理协议**三件套。协议（`model/generation.py`）：
 
@@ -139,36 +211,17 @@ python scripts/evaluate_pretrain.py --checkpoint <ckpt> --bin <bin> \
 最终答案：<答案><|im_end|>
 ```
 
-```bash
-# 1) 造数据（自带 --mix-general 混通用指令；保证 train/eval 题面零重合）
-python scripts/build_cot_sft.py --profile easy --easy-max 20 \
-    --out-train dataset/sft/sft_cot_easy_disjoint60k.jsonl \
-    --out-eval  dataset/sft/cot_eval_easy_disjoint.jsonl --n-train 60000 --n-eval 200
-
-# 2) 训练（只对 assistant 段算 loss，逐轮掩码）
-python3 -m minigpt.train.sft_trainer --pretrain models/checkpoints/pretrain_v3/final.pt \
-    --sft-jsonl dataset/sft/sft_cot_easy_disjoint60k.jsonl --data_max_lines 60000 \
-    --train_learning_rate 2e-5 --train_epochs 2 --paths_output_dir models/checkpoints/sft_cot_easy
-
-# 3) 推理（--thinking；single=一次生成"思考+答案"最稳，two-phase=先思考再作答）
-python3 scripts/generate.py --checkpoint models/checkpoints/sft_cot_easy/final.pt \
-    --tokenizer-dir models/tokenizer_v3 --chat --thinking --thinking-strategy single \
-    --prompt "请计算 27 ÷ 3 等于多少？" [--hide-thinking] [--thinking-max-tokens 120]
-
-# 4) 评测（留出集 + 贪心；算术评测必须 --repetition-penalty 1.0）
-python3 scripts/eval_thinking.py --checkpoint models/checkpoints/sft_cot_easy/final.pt \
-    --eval-jsonl dataset/sft/cot_eval_easy_disjoint.jsonl --n 60 \
-    --strategies plain,single,two-phase --repetition-penalty 1.0 --output result.json
-```
+四步命令（造数据 → 训练 → 推理 → 评测）见 **`../skills/minigpt-train/SKILL.md §5`**（唯一详述处）。
 
 Python 侧调用 `minigpt.model.generation.generate_with_thinking(...)`，返回 `thinking / answer / display / full / marker_hit`。
 
-**实测结论**（RTX2060，60 题，贪心）：思考模式确实有效（easy 0% → 90% → 100%），但 **hard 是容量墙**——
-47.9M 参数在多位数乘加上算不对，需放大模型或走「工具调用范式」。
-⚠️ **easy 的 100% 是记忆而非泛化**：easy 题目空间只有 1063 个唯一题目，旧留出集 156 条 100% 落在训练集内
-（hard 33.5%）。现在 `--easy-max` 可扩大题目空间，并用 `*_disjoint.jsonl` 做零重合验收——**该验收结果尚未产出**。
+**实测结论**（数字与结果表见根 `README.md`）：思考模式本身有效，但 **hard 是容量墙**——47.9M 参数在多位数
+乘加上算不对，加数据无用，要么放大模型、要么改成"模型只出算式、Python 结算"的工具调用范式。
+⚠️ easy 档的"100%"曾是**记忆**（题面空间仅 1,063 个，旧留出集 100% 落在训练集内）；
+现在用 `--easy-max` 扩大题面空间 + `*_disjoint.jsonl` 零重合验收，规则见
+`../skills/minigpt-train/references/data-distribution.md §9.1`。
 
-## 7. 训练看板与续训
+## 8. 训练看板与续训
 
 ```bash
 python scripts/train_dashboard.py --serve --port 8099 --refresh 5   # 浏览器（含 grad_norm 红虚线）
@@ -182,10 +235,10 @@ python scripts/train_dashboard.py --plot out.png                    # 导出损�
   增量领域续训必须 `--train_reset_step True`（否则"从 211k 步基座再训 N 步"会被当成绝对步数而直接判定训完）。
 - 长训用 `scripts/train_pretrain_resilient.sh`（崩溃自动续跑）+ `scripts/checkpoint_janitor.sh`（空间守护）。
 
-## 8. 测试与环境
+## 9. 测试与环境
 
 ```bash
-pytest -q                 # 189 项，CPU 即可运行，不需要数据与 GPU
+pytest tests/             # 214 passed + 1 skipped，CPU 即可运行，不需要数据与 GPU
 ```
 - RTX 20 系（Turing）不支持 FlashAttention-2：保持 `--model_flash_attn False`（默认）。
 - 换 tokenizer 只改 `--data_tokenizer_dir`（词表自动跟随，并与 `.bin` 的 `meta.vocab_size` 做强校验）；

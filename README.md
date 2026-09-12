@@ -33,16 +33,19 @@
 
 ## 💥 数据集
 
-统一从 **ModelScope** 下载（国内直连），分词器训练与预训练共用 [`gongjy/minimind_dataset`](https://www.modelscope.cn/datasets/gongjy/minimind_dataset) 的 `pretrain_t2t_mini.jsonl`：
+统一从 **ModelScope** 下载（国内直连），分词器训练与预训练共用 [`gongjy/minimind_dataset`](https://www.modelscope.cn/datasets/gongjy/minimind_dataset) 的 `pretrain_t2t.jsonl`：
 
 ```bash
 bash scripts/download_data.sh          # 下载到 dataset/
 ```
 
-| 用途 | 文件 | 大小 | 说明 |
-|---|---|---|---|
-| 分词器训练 + 预训练 | `pretrain_t2t_mini.jsonl` | ~1.2GB | 每行 `{"text": "..."}`，中英混合 |
-| SFT | `sft_data_zh.jsonl` | — | 见 [deepctrl-sft-data](https://www.modelscope.cn/datasets/deepctrl/deepctrl-sft-data) |
+| 用途 | 文件 | 大小 |
+|---|---|---|
+| 分词器训练 + 预训练（通用） | `pretrain_t2t.jsonl` | ~7.9GB（846.9 万行 / 3.24G 字符 ≈ 16.9 亿 tokens） |
+| 预训练（结构化 20%） | `chinese_cosmopedia`（教科书体） | 8/64 分片 |
+| SFT | `sft_data_zh.jsonl` | 10 万条 |
+
+> **各训练阶段用到哪些数据源、规模多大、怎么生成** → 见 [`dataset/README.md`](./dataset/README.md)（唯一详述处）。
 
 > ⚠️ 该语料是**长段落**文本，字节级 BPE 预分词会把整段中文当成一个超长「词」，全量训练分词器会 OOM；
 > 用 `scripts/train_tokenizer.py --max-lines 150000`（约 150MB）即可。
@@ -131,22 +134,14 @@ bash skills/minigpt-train/scripts/pipeline.sh --smoke
 bash skills/minigpt-train/scripts/pipeline.sh --full --hours 10
 ```
 
-也可以手动逐步执行：
+手动逐步执行（数据 → 预训练 → SFT → 推理 → 评测）的完整命令：
 
-```bash
-python scripts/build_pretrain_bin.py build --corpus-jsonl dataset/pretrain_t2t_mini.jsonl \
-    --tokenizer-dir models/tokenizer_v3 --out-bin dataset/bins/pretrain_v3_full.bin
-python3 -m minigpt.train.pretrainer --paths_output_dir models/checkpoints/pretrain_v3 \
-    --train_batch_size 8 --train_torch_compile True --train_max_steps 200000
-NPROC=2 bash scripts/pretrain_start.sh --paths_output_dir models/checkpoints/pretrain_ddp   # 多卡
-python3 -m minigpt.train.sft_trainer --pretrain models/checkpoints/pretrain_v3/final.pt \
-    --sft-jsonl dataset/sft/sft_data_zh.jsonl --data_max_lines 60000 \
-    --paths_output_dir models/checkpoints/sft_v3_chat
-python scripts/generate.py --checkpoint models/checkpoints/sft_v3_chat/final.pt \
-    --tokenizer-dir models/tokenizer_v3 --chat --prompt "什么是AI？" --max-new-tokens 200
-python scripts/evaluate_pretrain.py --checkpoint models/checkpoints/pretrain_v3/final.pt \
-    --tokenizer-dir models/tokenizer_v3 --bin dataset/bins/pretrain_v3_full.bin --split val
-```
+| 步骤 | 唯一详述处 |
+|---|---|
+| 造语料 / 建 bin | [`dataset/README.md`](./dataset/README.md) |
+| 预训练、领域续训、退火、双口径验收 | [`skills/minigpt-train/references/data-distribution.md`](./skills/minigpt-train/references/data-distribution.md) §8 |
+| SFT / CoT / 推理 / 评测（agent 流程 + 监控） | [`skills/minigpt-train/SKILL.md`](./skills/minigpt-train/SKILL.md) |
+| 包 API、配置项、指标面板 | [`minigpt/README.md`](./minigpt/README.md) |
 
 产物：`checkpoint-{step}.pth`（含 optimizer/scaler/RNG/config）、`best.pt`（eval 最优）、`final.pt`、
 `tensorboard/`、`metrics.json`、`sample.txt`。续训：`--paths_last_checkpoint_path .../checkpoint-N.pth`。
@@ -189,17 +184,17 @@ python scripts/evaluate_pretrain.py --checkpoint models/checkpoints/pretrain_v3/
 | run | 数据 | 步数 | eval_loss |
 |---|---|---|---|
 | `sft_v2_chat` | `sft_data_zh.jsonl` 60k × 2ep | 14,700 | 2.7795 |
-| `sft_v2_cot_easy` | `sft_cot_easy_60k.jsonl` × 2ep | 14,700 | 1.7397（best 1.6109） |
+| `sft_v2_cot_easy` | `sft_cot_easy_disjoint60k.jsonl` × 2ep | 14,700 | 1.7397（best 1.6109） |
 | `sft_v2_cot_hard` | `sft_cot_hard_80k.jsonl` × 3ep | 29,400 | 1.3565 |
 
 结论：**思考模式本身有效**（easy 从 0% → 90% → 100%），**hard 是容量墙**——47.9M 参数在多位数乘加上算不对，
 需放大模型或走「工具调用范式」（模型只生成算式，由 Python 结算）。⚠️ **easy 的 100% 是记忆而非泛化**（原因见下），
-需在零重合留出集上重测；完整命令、留出集与结果表见 [`minigpt/README.md` §5](./minigpt/README.md)。
+需在零重合留出集上重测；完整命令、留出集与结果表见 [`minigpt/README.md` §7](./minigpt/README.md)。
 
 ### ⚠️ CoT 评测集口径修正（重要）
 
 `build_cot_sft.py` 旧实现靠"换 seed"避免训练/评测重合，但 **easy profile 的操作数只有 1..9、全部唯一题目仅 1063 个**，
-而训练集有数万行——实测旧 `cot_eval_easy_zh.jsonl` 的 156 条题目 **100%** 出现在 60k 训练集里（hard 33.5%）。
+而训练集有数万行——实测旧 `cot_eval_easy_disjoint.jsonl` 的 156 条题目 **100%** 出现在 60k 训练集里（hard 33.5%）。
 现已改为"先去重建池、再切出留出集"并落盘自检零重合，同时提供两份可用于验收的**零重合**留出集：
 `dataset/sft/cot_eval_{easy,hard}_disjoint.jsonl`（`run_downstream_evals.sh` 已优先使用）。
 easy 侧配套训练集需用 `build_cot_sft.py --profile easy --easy-max 20` 重新生成后再 SFT。
@@ -217,7 +212,7 @@ setsid nohup env TAG=cap768 TOKENS=8.6e8 BS=16 ACCUM=1 \
 ## 💥 测试
 
 ```bash
-pytest -q                 # 189 项，CPU 即可，无需数据与 GPU
+pytest tests/             # 231 passed + 1 skipped，CPU 即可，无需数据与 GPU
 ```
 
 覆盖注意力/模型结构/初始化/数据管线与切分/SFT 掩码/训练器（LR 调度、记账、续训语义、原子写、权重衰减分组）/

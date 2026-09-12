@@ -6,7 +6,7 @@
 用法：
     python scripts/validate_pretrain.py \
         --tokenizer models/tokenizer_v3 \
-        --bin dataset/pretrain_t2t_mini.bin \
+        --bin dataset/bins/pretrain_v4_full.bin \
         --output models/checkpoints \
         --epochs 1 --batch-size 2 --grad-accum 4
 """

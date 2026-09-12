@@ -17,8 +17,8 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 SRC="${SRC:-dataset/IndustryCorpus2_computer_programming_code_high}"
-JSONL="${JSONL:-dataset/domain/code_corpus.jsonl}"
-BIN="${BIN:-dataset/bins/code_domain.bin}"
+JSONL="${JSONL:-dataset/domain/code_corpus.dedup.jsonl}"
+BIN="${BIN:-dataset/bins/code_domain_dedup.bin}"
 META="${BIN%.bin}.meta.json"
 OUT_DIR="${OUT_DIR:-models/checkpoints/pretrain_domain_code}"
 BASE_CKPT="${BASE_CKPT:-models/checkpoints/pretrain_v2_full/final.pt}"
@@ -39,7 +39,7 @@ if [ ! -f "$JSONL" ]; then
   python3 scripts/parquet_to_jsonl.py --src "$SRC" --out "$JSONL" \
     --min-chars "$MIN_CHARS" --max-chars "$MAX_CHARS" --max-line-length "$MAX_LINE" \
     --min-quality "$MIN_QUALITY" \
-    --mix-jsonl dataset/pretrain_t2t_mini.jsonl --mix-ratio "$MIX_RATIO" --mix-limit 300000 \
+    --mix-jsonl dataset/pretrain_t2t.jsonl --mix-ratio "$MIX_RATIO" --mix-limit 300000 \
     --tokenizer "$TOK" || exit 1
 else
   log "已存在 jsonl：$JSONL"
