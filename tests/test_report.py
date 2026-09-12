@@ -2,7 +2,7 @@
 import json
 import os
 
-from scripts.report_training import collect, estimate_params, render
+from scripts.report_training import collect, estimate_params, render, _loss_noise
 
 
 def _write(path, obj):
@@ -48,3 +48,26 @@ def test_collect_and_render(tmp_path):
     md = render(d)
     for expect in ("MiniGPT 训练报告", "pretrain_demo", "sft_demo", "two-phase", "人工智能。"):
         assert expect in md
+
+
+def test_loss_noise_is_one_over_sqrt_windows():
+    """噪声口径 ≈ 1/√(验证窗口数)：511 个窗口 → ±0.044；退化输入返回 None 而不是抛异常。"""
+    assert abs(_loss_noise(511) - 0.0442) < 5e-4
+    assert _loss_noise(0) is None and _loss_noise(None) is None and _loss_noise("x") is None
+
+
+def test_curve_section_renders_noise_note():
+    """§1.5 的曲线表要写出"相邻两点差多少才算真收敛"。
+
+    曲线本身来自 tensorboard（fixture 里没有事件文件），所以这里直接注入 curves 字段——
+    被测的是**渲染**逻辑，扫描逻辑另有 test_collect 覆盖。
+    """
+    d = {"time": "2026-01-01 00:00:00", "pretrain": [], "sft": [], "thinking": {},
+         "ppl": {}, "samples": {}, "success_rate": {},
+         "curves": {"pretrain_demo": {"eval": [(2000, 5.11), (4000, 4.03), (412000, 2.70)],
+                                      "tail_tok_s": 24000.0, "tail_train_loss": 2.6,
+                                      "eta_hours": None, "n_eval": 3,
+                                      "eval_rows": 511, "noise_sigma": _loss_noise(511)}}}
+    md = render(d)
+    assert "评估噪声" in md and "±0.0442" in md and "511 个验证窗" in md
+    assert "2.0k:5.1100" in md and "412.0k:2.7000" in md

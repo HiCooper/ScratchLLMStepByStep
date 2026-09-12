@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import math
 import os
 import re
 import sys
@@ -126,6 +127,22 @@ def _spark(values, width: int = 48) -> str:
     return "".join(blocks[min(7, int((v - lo) / (hi - lo) * 7.999))] for v in pts)
 
 
+def _loss_noise(eval_rows) -> float | None:
+    """验证集上 eval_loss 的 1σ 统计噪声 ≈ 1/√(验证窗口数)。
+
+    口径与 `scripts/audit_dataset.py` 的 split 检查一致（那边是 1/√(val_tok/(ctx-1))，
+    等价于 1/√(窗口数)），不要在两处各写一个公式。
+
+    为什么值得写进报告：v5 的验证切分是 511 个窗口，噪声约 ±0.044——
+    相邻两次 eval 差 0.02 时那是噪声不是收敛，不写清楚很容易被当成"还在稳定下降"。
+    """
+    try:
+        n = float(eval_rows)
+        return 1.0 / math.sqrt(n) if n > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def collect(cp: str | None = None):
     """扫描 checkpoints 目录并汇总（cp 可指定，便于测试）。"""
     cp = cp or os.path.join(ROOT, "models", "checkpoints")
@@ -156,6 +173,11 @@ def collect(cp: str | None = None):
                                  "params": estimate_params(cfg),
                                  "final": os.path.exists(os.path.join(os.path.dirname(path), "final.pt")),
                                  "best": os.path.exists(os.path.join(os.path.dirname(path), "best.pt"))})
+        # 把"验证集有多大、噪声多少"挂到 §1.5 的曲线上（曲线本身来自 tensorboard，与 metrics.json 独立）
+        c = data["curves"].get(run)
+        if c is not None:
+            c["eval_rows"] = data["pretrain"][-1].get("eval_rows")
+            c["noise_sigma"] = _loss_noise(c["eval_rows"])
     for path in sorted(glob.glob(os.path.join(cp, "sft_*", "metrics.json"))):
         m = load(path) or {}
         data["sft"].append({"run": os.path.basename(os.path.dirname(path)),
@@ -260,8 +282,11 @@ def render(d: dict) -> str:
                   f"| 曲线 step:loss | {_points_str(ev)} |",
                   f"| 末段吞吐（最近 500 步中位数） | {thr} |",
                   f"| 末段 train_loss（最近 200 步均值） | {_num(c.get('tail_train_loss'))} |",
-                  f"| ETA | {eta_s} |",
-                  ""]
+                  f"| ETA | {eta_s} |"]
+            if c.get("noise_sigma"):
+                L.append(f"| 评估噪声（1σ，{c.get('eval_rows')} 个验证窗） | "
+                         f"**±{c['noise_sigma']:.4f}** —— 相邻两点差得比它小就不必当成收敛 |")
+            L.append("")
     else:
         L += ["（无 tensorboard 数据：老 run 未开 writer，或事件文件已清理）", ""]
 
