@@ -21,7 +21,8 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 BASE="${BASE:-models/checkpoints/pretrain_v5}"        # 基座 run 目录
-CP="models/checkpoints"                               # report_training.py 的收集根
+# 收集根可覆盖：默认是仓库的 models/checkpoints；端到端测试会在沙箱里指到别处
+CP="${CP:-models/checkpoints}"                        # report_training.py 的收集根
 OUT="${OUT:-$CP/downstream_v5}"                       # 日志/汇总目录
 TOK="${TOK:-models/tokenizer_v3}"
 BASE_CKPT="$BASE/best.pt"; [ -f "$BASE_CKPT" ] || BASE_CKPT="$BASE/final.pt"
