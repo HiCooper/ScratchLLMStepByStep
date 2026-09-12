@@ -15,6 +15,7 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import torch
+from minigpt.cot_format import ANSWER_MARK
 from minigpt.data.sft_dataset import build_user_content  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
@@ -25,9 +26,9 @@ NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 
 
 def extract_answer(text, default=""):
-    """优先取 '最终答案：' 之后的数字，否则取最后一个数字。"""
-    if "最终答案：" in text:
-        tail = text.split("最终答案：")[-1]
+    """优先取 ANSWER_MARK（`最终答案：`）之后的数字，否则取最后一个数字。"""
+    if ANSWER_MARK in text:
+        tail = text.split(ANSWER_MARK)[-1]
         m = NUM_RE.search(tail)
         if m:
             return m.group(0)

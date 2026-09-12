@@ -13,9 +13,16 @@ import argparse
 import json
 import os
 import random
+import sys
 
-THINK = "让我逐步分析：\n"
-MARK = "最终答案："
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 格式标记的**唯一**定义在 minigpt/cot_format.py（推理与评测也从那里取）——
+# 以前这里和 generation.py 各写一份，改一处就会静默让评测掉进"取最后一个数字"的兜底。
+from minigpt.cot_format import ANSWER_MARK, THINK_PREFIX  # noqa: E402
+
+THINK = THINK_PREFIX
+MARK = ANSWER_MARK
 
 
 def _fmt(question, steps, answer):

@@ -178,3 +178,30 @@ def test_all_inference_chat_builders_share_training_format(tiny_tokenizer):
     assert sft_build_chat(tok, text) == expected
     assert probe_build_chat(tok, text) == expected
     assert row_prompt({"instruction": text, "input": ""}) == build_user_content(text)
+
+
+def test_cot_format_constants_are_single_sourced():
+    """思考/答案标记必须同源：训练数据、推理、评测三处各写一份会静默毁掉准确率。
+
+    真实隐患：三份拷贝里任何一处被改（哪怕全角→半角冒号），都不会报错，
+    只会让 eval_thinking 的 extract_answer 掉进"取最后一个数字"的兜底路径，
+    评测数字变成噪声。这里把"同源"锁进单测。
+    """
+    from minigpt import cot_format
+    from minigpt.model.generation import ANSWER_MARK as gen_mark, THINK_PREFIX as gen_think
+
+    assert gen_think == cot_format.THINK_PREFIX
+    assert gen_mark == cot_format.ANSWER_MARK
+
+    # 造数据脚本用的是同一份常量（模块级别名 THINK / MARK）
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "build_cot_sft_probe", os.path.join(SCRIPTS, "build_cot_sft.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert (mod.THINK, mod.MARK) == (cot_format.THINK_PREFIX, cot_format.ANSWER_MARK)
+
+    # 评测抠答案也要认得同一个标记
+    from scripts.eval_thinking import extract_answer
+    assert extract_answer(f"随便写点 {cot_format.ANSWER_MARK} 42") == "42"
+    assert extract_answer("没有标记 7 8") == "8"          # 兜底：最后一个数字

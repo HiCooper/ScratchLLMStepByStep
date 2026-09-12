@@ -21,10 +21,12 @@ from typing import List, Optional
 
 import torch
 
+from minigpt.cot_format import ANSWER_MARK, THINK_PREFIX
 from minigpt.model.transformer import (apply_repetition_penalty, sample_next_token)
 
-THINK_PREFIX = "让我逐步分析：\n"
-ANSWER_MARK = "最终答案："
+# 思考/答案标记的唯一定义在 minigpt/cot_format.py（训练数据生成、推理、评测三处共用）。
+# 这里重新导出，保持 `from minigpt.model.generation import THINK_PREFIX` 的既有用法可用。
+__all__ = ["THINK_PREFIX", "ANSWER_MARK"]
 
 
 @torch.inference_mode()
