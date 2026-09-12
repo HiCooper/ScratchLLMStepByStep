@@ -128,3 +128,53 @@ def test_eval_thinking_buckets_by_difficulty():
     assert bucket_of("请计算 8 ÷ 2 等于多少？") == "div_small"
     assert bucket_of("小明原来有 34 个苹果，又买了 8 个，然后吃掉了 13 个。请问现在还剩多少").startswith("word_")
     assert bucket_of("你好") == "other"
+
+
+def test_eval_prompt_matches_sft_training_format(tiny_tokenizer):
+    """评测 prompt 必须与 SFT 训练时的 user 内容逐 token 一致。
+
+    真实隐患：训练侧 `InstructionDataset.process` 的 user 内容是
+    `instruction + "\\n" + input`，而 eval_thinking 以前只传 `instruction`——
+    prompt 少一个换行（实测 18 vs 19 token，差异落在 `<|im_end|>` 之前），
+    于是"评测口径"不等于"训练口径"，数字再好看也不代表模型学到的能力。
+    """
+    from scripts.eval_thinking import row_prompt
+
+    row = {"instruction": "请计算 44 + 32 等于多少？", "input": ""}
+    assert row_prompt(row) == "请计算 44 + 32 等于多少？\n"
+    assert row_prompt({"instruction": "a", "input": "b"}) == "a\nb"
+    assert row_prompt({}) == "\n"          # 缺字段不抛异常（老数据）
+
+    tok = tiny_tokenizer
+    def ids(msgs, gen):
+        out = tok.apply_chat_template(msgs, tokenize=True, add_generation_prompt=gen)
+        return out if isinstance(out, list) else out["input_ids"]
+
+    user = row_prompt(row)
+    train_ids = ids([{"role": "user", "content": user},
+                     {"role": "assistant", "content": "2 + 3 = 5"}], gen=False)
+    eval_ids = ids([{"role": "user", "content": user}], gen=True)
+    # 不变式：评测 prompt 必须是训练序列的前缀（同一 user 段 + 生成提示）
+    assert train_ids[: len(eval_ids)] == eval_ids, "评测 prompt 不是训练格式的前缀"
+
+
+def test_all_inference_chat_builders_share_training_format(tiny_tokenizer):
+    """推理侧所有 chat prompt 构造器都必须走 build_user_content（唯一实现）。
+
+    以前 4 处各写各的：训练侧是 `instruction + "\\n" + input`，
+    而 sft_trainer 采样 / chat_probe / eval_thinking 都只传裸文本——
+    少一个换行，推理与训练口径不一致（且同一个模型在三处表现会不一样）。
+    """
+    from minigpt.data.sft_dataset import build_user_content
+    from minigpt.train.sft_trainer import build_chat as sft_build_chat
+    from scripts.chat_probe import build_chat as probe_build_chat
+    from scripts.eval_thinking import row_prompt
+
+    tok = tiny_tokenizer
+    text = "什么是AI？"
+    expected = tok.apply_chat_template(
+        [{"role": "user", "content": build_user_content(text)}],
+        tokenize=False, add_generation_prompt=True)
+    assert sft_build_chat(tok, text) == expected
+    assert probe_build_chat(tok, text) == expected
+    assert row_prompt({"instruction": text, "input": ""}) == build_user_content(text)

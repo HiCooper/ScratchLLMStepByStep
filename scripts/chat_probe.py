@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import torch  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
+from minigpt.data.sft_dataset import build_user_content  # noqa: E402
 from minigpt.model.checkpoint import build_model_from_checkpoint  # noqa: E402
 
 # ---- 质检规则 ----
@@ -101,8 +102,11 @@ def quality_flags(prompt: str, resp: str) -> list[str]:
 
 
 def build_chat(tokenizer, text: str) -> str:
-    return tokenizer.apply_chat_template([{"role": "user", "content": text}],
-                                        tokenize=False, add_generation_prompt=True)
+    """user 内容用与 SFT 训练相同的格式（`build_user_content`），否则 prompt
+    少一个换行，与训练口径不一致。"""
+    return tokenizer.apply_chat_template(
+        [{"role": "user", "content": build_user_content(text)}],
+        tokenize=False, add_generation_prompt=True)
 
 
 @torch.no_grad()

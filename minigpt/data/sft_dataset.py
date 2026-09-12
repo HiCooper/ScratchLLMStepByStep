@@ -10,6 +10,17 @@ from torch.utils.data import Dataset, DataLoader
 DEFAULT_ASSISTANT_MARKER = "<|im_start|>assistant\n"
 DEFAULT_TURN_END_MARKER = "<|im_end|>"
 
+def build_user_content(instruction, input_="") -> str:
+    """SFT 训练时 user 侧内容的**唯一**格式：`instruction + "\\n" + input`。
+
+    为什么单独抽出来：推理/评测脚本（`sft_trainer` 采样、`chat_probe`、`eval_thinking`）
+    必须用与训练完全相同的格式。实测只传 `instruction` 会让 prompt 少一个换行
+    （18 vs 19 token，差异正好落在回合结束符 `<|im_end|>` 之前）——口径不一致时
+    评测数字与样例都不能代表模型真正学到的能力。
+    """
+    return (instruction or "") + "\n" + (input_ or "")
+
+
 class InstructionDataset(Dataset):
     def __init__(self, jsonl_file_path, tokenizer, max_len=1024, max_lines=0):
         self.jsonl_file_path = jsonl_file_path
@@ -41,7 +52,7 @@ class InstructionDataset(Dataset):
             messages.append({"role": "user", "content": history_item[0][:self.max_len//2]})
             messages.append({"role": "assistant", "content": history_item[1][:self.max_len//2]})
         
-        user_content = item['instruction'] + '\n' + item['input']
+        user_content = build_user_content(item.get("instruction"), item.get("input"))
         assistant_content = item['output']
         messages.append({"role": "user", "content": user_content})
         messages.append({"role": "assistant", "content": assistant_content})

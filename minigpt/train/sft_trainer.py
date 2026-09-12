@@ -22,8 +22,9 @@ from torch.utils.data import DataLoader
 
 from minigpt.config import (DataConfig, ModelConfig, TrainConfig, PathConfig,
                             add_cli_overrides, build_run_config, dump_run_config)
-from minigpt.data.sft_dataset import (InstructionDataset, create_batch_collator,
-                                      resolve_stop_token_ids, split_dataset)
+from minigpt.data.sft_dataset import (
+    InstructionDataset, build_user_content, create_batch_collator,
+    resolve_stop_token_ids, split_dataset)
 from minigpt.model.checkpoint import load_state_into_model, model_kwargs_from_checkpoint
 from minigpt.model.transformer import GPTConfig, MiniGPT
 from minigpt.train.optim import build_optimizer
@@ -48,7 +49,8 @@ def parse_args():
 
 
 def build_chat(tokenizer, text):
-    messages = [{"role": "user", "content": text}]
+    # 与训练时的 user 内容格式一致（build_user_content），否则采样样例与训练口径不符
+    messages = [{"role": "user", "content": build_user_content(text)}]
     return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
 

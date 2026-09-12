@@ -14,7 +14,8 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-import torch  # noqa: E402
+import torch
+from minigpt.data.sft_dataset import build_user_content  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
 from minigpt.model.generation import generate_with_thinking  # noqa: E402
@@ -39,6 +40,15 @@ def norm(x):
         return f"{float(x):.1f}"
     except (TypeError, ValueError):
         return str(x)
+
+
+def row_prompt(row: dict) -> str:
+    """评测用的 user 内容：直接委托 `build_user_content`（训练的**唯一**格式实现）。
+
+    以前这里只传 `instruction`，prompt 比训练时少一个换行（实测 18 vs 19 token，
+    差异落在 `<|im_end|>` 之前）——评测量到的必须是与训练同分布下的能力。
+    """
+    return build_user_content(row.get("instruction"), row.get("input"))
 
 
 def bucket_of(question: str) -> str:
@@ -119,11 +129,12 @@ def main():
     t0 = time.time()
     for i, row in enumerate(rows):
         q = row["instruction"]
+        q_prompt = row_prompt(row)
         gold = extract_answer(row["output"])
         bkey = bucket_of(q)
         bslot = buckets.setdefault(bkey, {"n": 0, **{s: 0 for s in strategies}})
         bslot["n"] += 1
-        plain = plain_generate(model, tokenizer, q, device, args.max_new_tokens,
+        plain = plain_generate(model, tokenizer, q_prompt, device, args.max_new_tokens,
                                args.temperature, args.seed + i, args.repetition_penalty)
         p_pred = extract_answer(plain)
         row_detail = {"q": q, "gold": gold, "plain": plain[:120], "plain_pred": p_pred,
@@ -133,7 +144,7 @@ def main():
             bslot["plain"] += row_detail["plain_ok"]
         for strat in [s for s in strategies if s != "plain"]:
             res = generate_with_thinking(
-                model, tokenizer, q, strategy=strat,
+                model, tokenizer, q_prompt, strategy=strat,
                 max_new_tokens=args.max_new_tokens,
                 thinking_max_tokens=args.thinking_max_tokens, hide_thinking=True,
                 do_sample=args.temperature > 0, temperature=max(args.temperature, 1e-6),
