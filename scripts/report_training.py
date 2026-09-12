@@ -71,6 +71,29 @@ def estimate_params(cfg: dict) -> str:
 
 TB_TAGS = ("eval/loss", "eval/perplexity", "train/loss", "train/tokens_per_sec")
 
+# 文档记录的历史基线（同步自根 README「实测结果」表的 pretrain_v2_full 行；
+# tests/test_report.py 会解析 README 校验这几个数字，防止两边漂移）。
+# 用途：给出**同架构、同 token 预算**的参照点——v2 是 211k 步 × 4096 tokens/步 ≈ 8.6 亿 tokens，
+# v5 在同一步数消耗的 token 完全一致，可直接比 loss/perplexity（语料与验证切分不同，见渲染处的说明）。
+HISTORICAL_BASELINE = {
+    "run": "pretrain_v2_full",
+    "step": 211_000,
+    "tokens": 0.86e9,
+    "train_loss": 23.66,
+    "perplexity": 15.82,
+}
+
+
+def _token_matched(curve: dict, step: int, tol: float = 0.03):
+    """曲线上与目标步数**足够接近**（默认 ±3%）的评估点；否则返回 None。
+
+    必须有容差：评估每 2000 步一次，只取"≤ 目标步数的最后一个点"会让只跑了 76k 步的
+    run 被拿去和 211k 步的历史基线并列，等于偷换预算。±3%（±6330 步）刚好能命中
+    210k/212k，又不会把 76k 误判成"同预算"。
+    """
+    pts = [p for p in (curve.get("eval") or []) if abs(p[0] - step) <= step * tol]
+    return min(pts, key=lambda p: abs(p[0] - step)) if pts else None
+
 
 def read_tb(run_dir: str) -> dict:
     """读取 run 目录下 tensorboard 事件里的曲线；任何异常都降级为 {}（绝不因报告而失败）。
@@ -362,6 +385,39 @@ def render(d: dict) -> str:
             L += [f"### {name}", "", "```", text, "```", ""]
     else:
         L.append("（尚未产出：等待 4d 阶段）")
+
+    L += ["", "## 6. 历史基线对照（同架构 + 同 token 预算）", "",
+          "> **这不是 A/B 结论**。两行是「同模型结构、同步数（211k 步 × 4096 tokens/步 ≈ 8.6 亿 tokens）、"
+          "各自评各自语料的验证切分」。语料不同（v2 = 通用 mini 语料；v5 = 通用 80% + 教科书体 20%）"
+          "⇒ 验证集的固有熵不同，ppl 不能当作「谁更强」的证据；ppl 只在**同一 bin、同一 `--split val`** 下才可比。",
+          "> 它的价值：在完全相同的 token 预算上给出一个可核对的参照点（v2 是历史上唯一有据可查的同预算 run）。",
+          "> 注：v5 语料包含 v4 的约 80% 文档，所以**不能用 v5 模型去评 v4/v2 的 val**——那是它见过的东西。",
+          "", "| run | step | 训练 token | train_loss | eval_loss | perplexity | 口径 |",
+          "|---|---|---|---|---|---|---|",
+          f"| `{HISTORICAL_BASELINE['run']}`（历史，文档记录） | {HISTORICAL_BASELINE['step']:,} | "
+          f"{HISTORICAL_BASELINE['tokens'] / 1e8:.1f} 亿 | {HISTORICAL_BASELINE['train_loss']} | "
+          f"{math.log(HISTORICAL_BASELINE['perplexity']):.4f} | **{HISTORICAL_BASELINE['perplexity']}** | 它自己的 val |"]
+    matched_any = False
+    for run, c in sorted(d.get("curves", {}).items()):
+        pt = _token_matched(c, HISTORICAL_BASELINE["step"])
+        if pt is None:
+            last = (c.get("eval") or [])[-1] if c.get("eval") else None
+            cur = f"当前 {last[0]:,} 步，eval_loss {last[1]:.4f}" if last else "暂无评估点"
+            L.append(f"| `{run}`（本次） | 尚未到 {HISTORICAL_BASELINE['step']:,} 步（{cur}） "
+                     "| — | — | — | — | — |")
+            continue
+        matched_any = True
+        ppl = math.exp(min(pt[1], 80.0))
+        delta = (ppl / HISTORICAL_BASELINE["perplexity"] - 1) * 100
+        tok = pt[0] * 4096
+        L.append(f"| `{run}`（本次，同预算点） | {pt[0]:,} | {tok / 1e8:.2f} 亿 | — | {pt[1]:.4f} | "
+                 f"**{ppl:.2f}** | 它自己的 val |")
+        L += ["", f"同预算点对比：`{run}` perplexity **{ppl:.2f}** vs `{HISTORICAL_BASELINE['run']}` "
+                  f"**{HISTORICAL_BASELINE['perplexity']}**（{delta:+.1f}%，负值=更低）。"
+                  "如上行所述，这个差里同时含「语料变化」与「验证集变化」，不能单独归因于数据质量。"]
+    if not matched_any and d.get("curves"):
+        L.append("")
+        L.append("（同预算点还没到：基座跑到 211,000 步后本行会自动出现）")
     return "\n".join(L)
 
 

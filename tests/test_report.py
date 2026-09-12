@@ -94,3 +94,40 @@ def test_difficulty_section_degrades_without_buckets():
          "curves": {}, "thinking": {"eval_old_cot_easy": {"n": 60, "accuracy": {"plain": 1.0}}}}
     md = render(d)
     assert "## 4.5" in md and "尚未产出" in md
+
+
+def _curve(eval_pts):
+    return {"pretrain_v5": {"eval": eval_pts, "tail_tok_s": 24000.0, "tail_train_loss": 2.6,
+                            "eta_hours": None, "n_eval": len(eval_pts)}}
+
+
+def _base_dict(curves):
+    return {"time": "2026-01-01 00:00:00", "pretrain": [], "sft": [], "ppl": {}, "samples": {},
+            "success_rate": {}, "thinking": {}, "curves": curves}
+
+
+def test_historical_baseline_matches_readme():
+    """§6 里引用的历史数字必须与根 README「实测结果」表一致（两处漂移=报告在编数字）。"""
+    import re
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    txt = open(os.path.join(root, "README.md"), encoding="utf-8").read()
+    row = re.search(r"\|\s*`pretrain_v2_full`\s*\|([^\n]+)\|", txt)
+    assert row, "README 里找不到 pretrain_v2_full 的结果行"
+    cells = [c.strip().strip("*") for c in row.group(1).split("|")]
+    from scripts.report_training import HISTORICAL_BASELINE as HB
+    assert int(cells[0].replace(",", "")) == HB["step"]
+    assert abs(float(cells[2]) - HB["train_loss"]) < 1e-6
+    assert abs(float(cells[3]) - HB["perplexity"]) < 1e-6
+
+
+def test_token_matched_comparison_requires_close_budget():
+    """只跑到 76k 步时**不能**冒充"同预算点"去和 211k 步的历史基线并列。"""
+    early = render(_base_dict(_curve([(2000, 5.11), (76000, 2.7174)])))
+    assert "尚未到 211,000 步" in early and "同预算点对比" not in early
+
+    reached = render(_base_dict(_curve([(2000, 5.11), (210000, 2.55), (212000, 2.54)])))
+    assert "| `pretrain_v5`（本次，同预算点） | 210,000 | 8.60 亿 |" in reached
+    assert "同预算点对比" in reached
+    # 历史行与说明必须在
+    assert "| `pretrain_v2_full`（历史，文档记录） | 211,000 |" in reached
+    assert "这不是 A/B 结论" in reached and "同一 bin、同一 `--split val`" in reached

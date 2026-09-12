@@ -125,22 +125,10 @@ stage "对话质检（chat_probe 51 场景）" "$OUT/chat_probe.log" \
 stage "汇总报告" "$OUT/report.log" \
   python3 scripts/report_training.py --out "$CP/TRAINING_REPORT_v5.md"
 
-# ── ⑦ 历史基线对照：通用生成器只认磁盘上的产物，而历史 run 的 checkpoint/ppl 已被清理，
-#      数字只存于 README。这里把它连同"不可直接比较"的口径说明一起追加到报告末尾。
-{
-  echo ""
-  echo "## 6. 历史基线对照（⚠️ 口径不同，仅供参照，**不是** A/B 结论）"
-  echo ""
-  echo "| run | step | 训练 token | 语料 | 同 run val ppl | 备注 |"
-  echo "|---|---|---|---|---|---|"
-  echo "| \`pretrain_v2_full\`（历史） | 211,000 | 8.6 亿 | mini 语料 | **15.82** | 见根 README「实测结果」 |"
-  echo "| 领域续训 v2（历史） | — | — | +15% 代码 | 22.93 | 通用 ppl 退化 +45%，部分灾难性遗忘 |"
-  echo "| \`pretrain_v5\`（本次） | 见 §1 | 16.92 亿 × 1 epoch | 通用 80% + 结构化 20% | 见 §1 / §1.5 | 本 run 自己的 val 切分 |"
-  echo ""
-  echo "为什么不能把 15.82 与本次 ppl 直接对比：v2 评的是它自己语料的 val 切分，"
-  echo "而 v5 换了语料（\`pretrain_t2t.jsonl\` 随机 80% + cosmopedia 20%）、换了 token 预算（8.6 亿 → 16.92 亿）；"
-  echo "ppl 只在**同一 bin、同一 \`--split val\`** 下才可比。要做真 A/B，需用同等 token 预算另训一个 v4 模型。"
-} >> "$CP/TRAINING_REPORT_v5.md"
+# ── ⑦ 历史基线对照已移进生成器本身（report_training.py §6）
+#      原因：只有生成器手里有 eval 曲线，才能给出**同 token 预算**的可核对点
+#      （211k 步 ≈ 8.6 亿 tokens vs v2 的 15.82），而不是只贴一行"口径不同、不可比"。
+#      这里不再追加任何内容，避免出现两个 §6。
 
 log "全部阶段结束"
 {
