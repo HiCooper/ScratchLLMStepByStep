@@ -202,8 +202,6 @@ def collate(batch_inputs, pad_token_id, tokenizer, device='cpu',
             f"样例 token 文本：{tokenizer.decode(items[0][:60])!r}")
     target_tensors = torch.tensor(batch_targets, dtype=torch.int64).to(device)
     return input_tensors, target_tensors, attention_mask
-    target_tensors = torch.tensor(batch_targets, dtype=torch.int64).to(device)
-    return input_tensors, target_tensors, attention_mask
 
 def resolve_stop_token_ids(tokenizer,
                            turn_end_marker=DEFAULT_TURN_END_MARKER) -> list:
