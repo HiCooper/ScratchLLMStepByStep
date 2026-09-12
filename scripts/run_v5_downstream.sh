@@ -1,124 +1,174 @@
 #!/bin/bash
-# v5 下游链路：基座 → SFT → CoT(easy/hard) → 评测，逐阶段记录结果并生成汇总。
+# v5 下游链路：基座 → SFT → CoT(easy/hard) → 评测 → 汇总报告
 #
-# 设计依据（见 references/data-distribution.md）：
+# 产物布局刻意与 `scripts/report_training.py` 的收集规则对齐（否则报告收不到）：
+#   models/checkpoints/pretrain_*/metrics.json    基座
+#   models/checkpoints/sft_*/metrics.json         SFT / CoT run
+#   models/checkpoints/ppl_*.json                 同切分 ppl（**仅本 run 的 v5 val**，跨语料不可比）
+#   models/checkpoints/eval_*_cot_*.json          CoT 分档准确率
+#   models/checkpoints/samples_*.txt              样例
+# 日志与 SUMMARY 另放 downstream_v5/，避免与 run 目录混在一起。
+#
+# 设计依据（references/data-distribution.md）：
 #   - SFT 抽 4 万条 × 2 epoch（10 万条 / 21.2M 监督 token 对 47.9M 模型偏多，易过拟合）
-#   - CoT easy 用 --easy-max 50 重新生成训练集与留出集：题面空间 ≥ 样本数/3，避免"100% 是记忆"
-#   - CoT 从 chat 模型出发；评测必须 --repetition-penalty 1.0（算术题惩罚重复数字会误判）
+#   - CoT easy 用 --easy-max 50：唯一题目 45200（easy-max 9 只有 1063）→ 重复率 56×→1.33×
+#   - 算术评测必须 --repetition-penalty 1.0
 #
-# 用法（长任务，托管后台跑）：
-#   BASE=models/checkpoints/pretrain_v5 bash scripts/run_v5_downstream.sh
-# 产物：models/checkpoints/downstream_v5/{*.log,SUMMARY.md}
+# 用法：BASE=models/checkpoints/pretrain_v5 bash scripts/run_v5_downstream.sh
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 BASE="${BASE:-models/checkpoints/pretrain_v5}"        # 基座 run 目录
-OUT="${OUT:-models/checkpoints/downstream_v5}"        # 汇总/日志目录
+CP="models/checkpoints"                               # report_training.py 的收集根
+OUT="${OUT:-$CP/downstream_v5}"                       # 日志/汇总目录
 TOK="${TOK:-models/tokenizer_v3}"
 BASE_CKPT="$BASE/best.pt"; [ -f "$BASE_CKPT" ] || BASE_CKPT="$BASE/final.pt"
 mkdir -p "$OUT"
-SUMMARY="$OUT/SUMMARY.md"
-: > "$SUMMARY"
+SUMMARY="$OUT/SUMMARY.md"; : > "$SUMMARY"
 
-log()  { echo "[$(date '+%F %T')] $*" | tee -a "$OUT/driver.log"; }
+log() { echo "[$(date '+%F %T')] $*" | tee -a "$OUT/driver.log"; }
 stage() {  # stage <名字> <日志文件> <命令...>
   local name="$1"; shift; local lf="$1"; shift
   log "▶ $name 开始（日志 $lf）"
   if "$@" > "$lf" 2>&1; then
-    log "✅ $name 完成"
-    echo "- ✅ $name" >> "$SUMMARY"
+    log "✅ $name 完成"; echo "- ✅ $name" >> "$SUMMARY"
   else
-    log "❌ $name 失败（rc=$?），继续下一阶段；详见 $lf"
-    echo "- ❌ $name —— 见 \`$lf\` 末尾" >> "$SUMMARY"
+    log "❌ $name 失败（rc=$?），继续下一阶段；详见 $lf"; echo "- ❌ $name —— 见 \`$lf\` 末尾" >> "$SUMMARY"
   fi
 }
 ckpt_of() { [ -f "$1/best.pt" ] && echo "$1/best.pt" || echo "$1/final.pt"; }
 
+# SFT 阶段专用：失败（多半是变长 padding 导致显存峰值）就降 batch、加梯度累积重试一次。
+# 基座跑 20 小时才轮到 SFT，不能让它因为一次 OOM 就整个交付缺一块。
+SFT_BS="${SFT_BS:-8}"     # 首次尝试的 batch（失败自动降 4 + accum 2）
+sft_stage() {  # sft_stage <名字> <日志> <输出目录> <公共参数串（不含 --train_batch_size）>
+  local name="$1" lf="$2" out="$3" args="$4"
+  log "▶ $name 开始（日志 $lf）"
+  # batch 由本函数统一注入，调用方**不要**在 $args 里再写 --train_batch_size，
+  # 否则重试时会出现同名参数重复（argparse 取最后一个，能跑但日志误导）
+  if python3 -u -m minigpt.train.sft_trainer $args \
+       --train_batch_size "$SFT_BS" --paths_output_dir "$out" > "$lf" 2>&1; then
+    log "✅ $name 完成"; echo "- ✅ $name" >> "$SUMMARY"; return 0
+  fi
+  log "⚠️ $name 首次失败，降 batch 重试（bs$SFT_BS → bs4 + grad_accum 2，有效 batch 不变）"
+  if python3 -u -m minigpt.train.sft_trainer $args \
+       --train_batch_size 4 --train_grad_accumulation_steps 2 \
+       --paths_output_dir "$out" > "${lf%.log}.retry.log" 2>&1; then
+    log "✅ $name 完成（降 batch 后）"; echo "- ✅ $name（OOM 降 batch 重试成功）" >> "$SUMMARY"; return 0
+  fi
+  log "❌ $name 两次都失败；详见 $lf 与 ${lf%.log}.retry.log"
+  echo "- ❌ $name（含降 batch 重试）—— 见 \`${lf%.log}.retry.log\` 末尾" >> "$SUMMARY"; return 1
+}
+
 [ -f "$BASE_CKPT" ] || { log "❌ 找不到基座 checkpoint（$BASE/best.pt|final.pt），退出"; exit 1; }
 log "基座 checkpoint = $BASE_CKPT"
-python3 -c "
-import json;m=json.load(open('$BASE/metrics.json',encoding='utf-8')) if __import__('os').path.exists('$BASE/metrics.json') else {}
-print('基座指标:', {k:m.get(k) for k in ('step','train_loss','eval_loss','perplexity','best_eval_loss','best_step')})" 2>/dev/null | tee -a "$OUT/driver.log"
 
 # ── ① SFT 指令微调（4 万条 × 2 epoch；sft_data_zh 已打乱，取前 4 万行无前缀偏差）
-SFT="$OUT/sft_v5_chat"
-stage "SFT 指令微调" "$OUT/sft.log" \
-  python3 -u -m minigpt.train.sft_trainer \
-    --pretrain "$BASE_CKPT" --data_tokenizer_dir "$TOK" \
-    --sft-jsonl dataset/sft/sft_data_zh.jsonl --data_max_lines 40000 --data_max_len 512 \
-    --model_context_length 512 \
-    --train_batch_size 8 --train_learning_rate 1e-5 --train_warmup_steps 50 \
-    --train_epochs 2 --train_eval_steps 200 --train_save_steps 500 \
-    --paths_output_dir "$SFT"
+SFT="$CP/sft_v5_chat"
+sft_stage "SFT 指令微调" "$OUT/sft.log" "$SFT" \
+  "--pretrain $BASE_CKPT --data_tokenizer_dir $TOK --sft-jsonl dataset/sft/sft_data_zh.jsonl \
+   --data_max_lines 40000 --data_max_len 512 --train_learning_rate 1e-5 \
+   --train_warmup_steps 50 --train_epochs 2 --train_eval_steps 200 --train_save_steps 500"
 SFT_CKPT=$(ckpt_of "$SFT")
 
-# ── ② CoT 数据：easy 用 --easy-max 50 重生成（先建池再切留出集，保证零重合）
-stage "CoT easy 数据生成(easy-max 50)" "$OUT/cot_data.log" \
-  python3 scripts/build_cot_sft.py --profile easy --easy-max 50 \
-    --n-train 60000 --n-eval 200 \
-    --out-train dataset/sft/sft_cot_easy_em50_60k.jsonl \
-    --out-eval  dataset/sft/cot_eval_easy_em50_disjoint.jsonl
+# ── ② CoT 数据：easy 用 --easy-max 50（幂等：已存在就跳过）
+if [ -s dataset/sft/sft_cot_easy_em50_60k.jsonl ] && [ -s dataset/sft/cot_eval_easy_em50_disjoint.jsonl ]; then
+  log "⏭ CoT easy 数据已存在，跳过生成"; echo "- ⏭ CoT easy 数据（已存在，跳过）" >> "$SUMMARY"
+else
+  stage "CoT easy 数据生成(easy-max 50)" "$OUT/cot_data.log" \
+    python3 scripts/build_cot_sft.py --profile easy --easy-max 50 \
+      --n-train 60000 --n-eval 200 \
+      --out-train dataset/sft/sft_cot_easy_em50_60k.jsonl \
+      --out-eval  dataset/sft/cot_eval_easy_em50_disjoint.jsonl
+fi
 
-# ── ③ CoT easy 训练（从 chat 模型出发）
-COTE="$OUT/sft_v5_cot_easy"
-stage "CoT easy 训练" "$OUT/cot_easy.log" \
-  python3 -u -m minigpt.train.sft_trainer \
-    --pretrain "$SFT_CKPT" --data_tokenizer_dir "$TOK" \
-    --sft-jsonl dataset/sft/sft_cot_easy_em50_60k.jsonl --data_max_lines 60000 --data_max_len 512 \
-    --model_context_length 512 \
-    --train_batch_size 8 --train_learning_rate 1.5e-5 --train_warmup_steps 50 \
-    --train_epochs 2 --train_eval_steps 200 --train_save_steps 500 \
-    --paths_output_dir "$COTE"
+# ── ③ CoT easy（从 chat 模型出发）
+COTE="$CP/sft_v5_cot_easy"
+sft_stage "CoT easy 训练" "$OUT/cot_easy.log" "$COTE" \
+  "--pretrain $SFT_CKPT --data_tokenizer_dir $TOK --sft-jsonl dataset/sft/sft_cot_easy_em50_60k.jsonl \
+   --data_max_lines 60000 --data_max_len 512 --train_learning_rate 1.5e-5 \
+   --train_warmup_steps 50 --train_epochs 2 --train_eval_steps 200 --train_save_steps 500"
 
-# ── ④ CoT hard 训练（同样从 chat 出发，便于与 easy 对比）
-COTH="$OUT/sft_v5_cot_hard"
-stage "CoT hard 训练" "$OUT/cot_hard.log" \
-  python3 -u -m minigpt.train.sft_trainer \
-    --pretrain "$SFT_CKPT" --data_tokenizer_dir "$TOK" \
-    --sft-jsonl dataset/sft/sft_cot_hard_80k.jsonl --data_max_lines 80000 --data_max_len 512 \
-    --model_context_length 512 \
-    --train_batch_size 8 --train_learning_rate 1.5e-5 --train_warmup_steps 50 \
-    --train_epochs 2 --train_eval_steps 200 --train_save_steps 500 \
-    --paths_output_dir "$COTH"
+# ── ④ CoT hard（同样从 chat 出发，便于与 easy 对比）
+COTH="$CP/sft_v5_cot_hard"
+sft_stage "CoT hard 训练" "$OUT/cot_hard.log" "$COTH" \
+  "--pretrain $SFT_CKPT --data_tokenizer_dir $TOK --sft-jsonl dataset/sft/sft_cot_hard_80k.jsonl \
+   --data_max_lines 80000 --data_max_len 512 --train_learning_rate 1.5e-5 \
+   --train_warmup_steps 50 --train_epochs 2 --train_eval_steps 200 --train_save_steps 500"
 
-# ── ⑤ 评测：基座 ppl（同口径 val）+ CoT 零重合留出集（分档）+ 对话质检
-stage "基座 ppl（--split val）" "$OUT/eval_base_ppl.log" \
+# ── ⑤ 评测（产物命名要对上 report_training.py 的 glob）
+stage "v5 基座 ppl（--split val）" "$OUT/ppl_v5.log" \
   python3 scripts/evaluate_pretrain.py --checkpoint "$BASE_CKPT" --tokenizer-dir "$TOK" \
     --bin dataset/bins/pretrain_v5_full.bin --split val --batch-size 8 \
-    --output "$OUT/eval_base_ppl.json"
-
-stage "CoT easy 准确率（零重合留出集，分档）" "$OUT/eval_cot_easy.log" \
+    --output "$CP/ppl_v5_general.json"
+# 刻意**不做** "v4/历史基线 ppl 对比"：v5 语料 = pretrain_t2t.jsonl 的随机 80% + cosmopedia 20%，
+# 而 v4 = 该文件 100% ⇒ v5 的训练集已包含 ~80% 的 v4 文档（历史 v2 用的 mini 语料更是被 100% 包含）。
+# 用 v5 模型去评 v4/v2 的 val 切分 = 在测它见过的东西，数字会虚假偏低，不能作为 A/B 证据。
+# 有效口径只有两个：① 本 run 自己的 v5 val 切分（文档级零重叠）；② 另行用同等预算训一个 v4 模型做真 A/B。
+log "口径说明：跳过 v4/历史 ppl 对比（v5 语料包含 v4 的 ~80% 文档，跨语料 ppl 不可比）"
+echo "- ⏭ 跨语料 ppl 对比（v5 含 v4 的 ~80% 文档，不可比；有效对比见 SUMMARY 口径说明）" >> "$SUMMARY"
+stage "CoT easy 分档准确率（零重合留出集）" "$OUT/eval_cot_easy.log" \
   python3 scripts/eval_thinking.py --checkpoint "$(ckpt_of "$COTE")" --tokenizer-dir "$TOK" \
     --eval-jsonl dataset/sft/cot_eval_easy_em50_disjoint.jsonl --n 200 \
-    --strategies plain,single --repetition-penalty 1.0 --output "$OUT/eval_cot_easy.json"
-
-stage "CoT hard 准确率（零重合留出集，分档）" "$OUT/eval_cot_hard.log" \
+    --strategies plain,single --repetition-penalty 1.0 --output "$CP/eval_v5_cot_easy.json"
+stage "CoT hard 分档准确率（零重合留出集）" "$OUT/eval_cot_hard.log" \
   python3 scripts/eval_thinking.py --checkpoint "$(ckpt_of "$COTH")" --tokenizer-dir "$TOK" \
     --eval-jsonl dataset/sft/cot_eval_hard_disjoint.jsonl --n 200 \
-    --strategies plain,single --repetition-penalty 1.0 --output "$OUT/eval_cot_hard.json"
-
-stage "对话质检（chat_probe 51 场景）" "$OUT/eval_chat_probe.log" \
+    --strategies plain,single --repetition-penalty 1.0 --output "$CP/eval_v5_cot_hard.json"
+stage "对话质检（chat_probe 51 场景）" "$OUT/chat_probe.log" \
   python3 scripts/chat_probe.py --checkpoint "$SFT_CKPT" --tokenizer-dir "$TOK" \
-    --output "$OUT/chat_probe_v5.txt"
+    --output "$CP/samples_v5_chat_probe.txt"
 
-# ── 汇总
-log "全部阶段结束，汇总写入 $SUMMARY"
+# ── ⑥ 汇总报告（复用既有生成器，自动收集上面那些路径）
+stage "汇总报告" "$OUT/report.log" \
+  python3 scripts/report_training.py --out "$CP/TRAINING_REPORT_v5.md"
+
+# ── ⑦ 历史基线对照：通用生成器只认磁盘上的产物，而历史 run 的 checkpoint/ppl 已被清理，
+#      数字只存于 README。这里把它连同"不可直接比较"的口径说明一起追加到报告末尾。
 {
   echo ""
-  echo "## 产物"
-  echo "- 基座：\`$BASE_CKPT\`"
-  echo "- SFT：\`$(ckpt_of "$SFT")\`"
-  echo "- CoT easy：\`$(ckpt_of "$COTE")\`"
-  echo "- CoT hard：\`$(ckpt_of "$COTH")\`"
+  echo "## 6. 历史基线对照（⚠️ 口径不同，仅供参照，**不是** A/B 结论）"
   echo ""
-  echo "## 关键指标"
-  for f in eval_base_ppl eval_cot_easy eval_cot_hard; do
-    [ -f "$OUT/$f.json" ] && echo "- $f: \`$(head -c 400 "$OUT/$f.json" | tr -d '\n')\`"
-  done
+  echo "| run | step | 训练 token | 语料 | 同 run val ppl | 备注 |"
+  echo "|---|---|---|---|---|---|"
+  echo "| \`pretrain_v2_full\`（历史） | 211,000 | 8.6 亿 | mini 语料 | **15.82** | 见根 README「实测结果」 |"
+  echo "| 领域续训 v2（历史） | — | — | +15% 代码 | 22.93 | 通用 ppl 退化 +45%，部分灾难性遗忘 |"
+  echo "| \`pretrain_v5\`（本次） | 见 §1 | 16.92 亿 × 1 epoch | 通用 80% + 结构化 20% | 见 §1 / §1.5 | 本 run 自己的 val 切分 |"
+  echo ""
+  echo "为什么不能把 15.82 与本次 ppl 直接对比：v2 评的是它自己语料的 val 切分，"
+  echo "而 v5 换了语料（\`pretrain_t2t.jsonl\` 随机 80% + cosmopedia 20%）、换了 token 预算（8.6 亿 → 16.92 亿）；"
+  echo "ppl 只在**同一 bin、同一 \`--split val\`** 下才可比。要做真 A/B，需用同等 token 预算另训一个 v4 模型。"
+} >> "$CP/TRAINING_REPORT_v5.md"
+
+log "全部阶段结束"
+{
+  echo ""
+  echo "## 产物路径"
+  echo "| 阶段 | checkpoint |"
+  echo "|---|---|"
+  echo "| 基座 | \`$BASE_CKPT\` |"
+  echo "| SFT | \`$(ckpt_of "$SFT")\` |"
+  echo "| CoT easy | \`$(ckpt_of "$COTE")\` |"
+  echo "| CoT hard | \`$(ckpt_of "$COTH")\` |"
+  echo ""
+  echo "报告：\`$CP/TRAINING_REPORT_v5.md\`"
+  echo ""
+  echo "## 评测口径说明（重要）"
+  echo "- ✅ **只用 v5 val 切分**（\`pretrain_v5_full.bin --split val\`）：均匀分块+双端对齐文档边界，"
+  echo "  与训练文档级零重叠，是本次唯一有效的泛化指标。"
+  echo "- ❌ **不与 v4 / 历史 v2 的 ppl 做直接对比**：v5 语料 = \`pretrain_t2t.jsonl\` 随机 80% + cosmopedia 20%，"
+  echo "  而 v4 = 该文件 100%、v2 用的是其子集 mini ⇒ v5 模型已见过它们 ~80–100% 的文档，"
+  echo "  评它们的 val 会虚假偏低。要做真 A/B 需用**同等 token 预算另训一个 v4 模型**再同切分对比。"
+  echo "评测：\`$CP/{ppl_v5_general,eval_v5_cot_easy,eval_v5_cot_hard}.json\` + 对话样例 \`$CP/samples_v5_chat_probe.txt\`"
   echo ""
   echo "## 各阶段 eval_loss（训练日志尾部）"
   for lf in sft cot_easy cot_hard; do
     echo "### $lf"; grep -E "eval_loss" "$OUT/$lf.log" 2>/dev/null | tail -3
+  done
+  echo ""
+  echo "## 关键指标"
+  for f in ppl_v5_general eval_v5_cot_easy eval_v5_cot_hard; do
+    [ -f "$CP/$f.json" ] && echo "- $f: \`$(head -c 300 "$CP/$f.json" | tr -d '\n')\`"
   done
 } >> "$SUMMARY" 2>&1
 log "完成。SUMMARY: $SUMMARY"

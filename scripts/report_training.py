@@ -3,6 +3,7 @@
 
 自动收集：
   - 预训练 run：models/checkpoints/pretrain_*/metrics.json（eval_loss / perplexity）
+  - 预训练曲线：pretrain_*/tensorboard 事件文件（eval_loss 全程曲线 / 吞吐 / ETA）
   - SFT/CoT run：models/checkpoints/sft_*/metrics.json
   - 思考模式评测：models/checkpoints/eval_v2_cot_{easy,hard}.json（plain/single/two-phase 准确率）
   - 同切分 ppl 对比：models/checkpoints/ppl_*.json
@@ -67,11 +68,78 @@ def estimate_params(cfg: dict) -> str:
         return "?"
 
 
+TB_TAGS = ("eval/loss", "eval/perplexity", "train/loss", "train/tokens_per_sec")
+
+
+def read_tb(run_dir: str) -> dict:
+    """读取 run 目录下 tensorboard 事件里的曲线；任何异常都降级为 {}（绝不因报告而失败）。
+
+    metrics.json 只留最后一次评估，**全程 eval_loss 曲线只在 tensorboard 里**，
+    而"曲线"是交付报告的必要内容，所以这里把它抽出来。
+    """
+    tb_dir = os.path.join(run_dir, "tensorboard")
+    if not os.path.isdir(tb_dir):
+        return {}
+    try:
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+        ea = EventAccumulator(tb_dir)
+        ea.Reload()
+        tags = set(ea.Tags().get("scalars", []))
+        return {t: [(int(e.step), float(e.value)) for e in ea.Scalars(t)]
+                for t in TB_TAGS if t in tags}
+    except Exception:  # noqa: BLE001 —— 缺包/坏事件文件都不该让报告生成失败
+        return {}
+
+
+def _curve_summary(run_dir: str, cfg: dict) -> dict:
+    """eval_loss 曲线 + 吞吐 + ETA（ETA 需要 config.json 里的 max_steps）。"""
+    tb = read_tb(run_dir)
+    ev = tb.get("eval/loss") or []
+    tps = [v for _, v in (tb.get("train/tokens_per_sec") or [])[-500:]]
+    tr = [v for _, v in (tb.get("train/loss") or [])[-200:]]
+    out = {"eval": ev, "tail_tok_s": (sorted(tps)[len(tps) // 2] if tps else None),
+           "tail_train_loss": (sum(tr) / len(tr) if tr else None), "eta_hours": None,
+           "n_eval": len(ev)}
+    try:
+        max_steps = int(cfg["train"]["max_steps"])
+        batch = int(cfg["train"].get("batch_size") or 8)
+        ctx = int((cfg.get("model") or {}).get("model_context_length") or 512)
+    except Exception:  # noqa: BLE001
+        return out
+    if out["tail_tok_s"] and ev and ev[-1][0] < max_steps:
+        out["max_steps"] = max_steps
+        out["eta_from_step"] = ev[-1][0]
+        out["eta_hours"] = (max_steps - ev[-1][0]) * batch * ctx / out["tail_tok_s"] / 3600.0
+    return out
+
+
+def _spark(values, width: int = 48) -> str:
+    """把 eval_loss 曲线压成一行 sparkline（▁▂▃▄▅▆▇█），让报告自解释。"""
+    if len(values) < 2:
+        return ""
+    blocks = "▁▂▃▄▅▆▇█"
+    step = max(1, len(values) // width)
+    pts = values[::step][:width]
+    lo, hi = min(pts), max(pts)
+    if hi - lo < 1e-9:
+        return blocks[0] * len(pts)
+    return "".join(blocks[min(7, int((v - lo) / (hi - lo) * 7.999))] for v in pts)
+
+
 def collect(cp: str | None = None):
     """扫描 checkpoints 目录并汇总（cp 可指定，便于测试）。"""
     cp = cp or os.path.join(ROOT, "models", "checkpoints")
     data = {"time": datetime.now().strftime("%F %T"), "pretrain": [], "sft": [],
-            "thinking": {}, "ppl": {}, "samples": {}, "success_rate": {}}
+            "thinking": {}, "ppl": {}, "samples": {}, "success_rate": {}, "curves": {}}
+    # 曲线独立于 metrics.json 扫描：metrics.json 只在训练结束才落盘，
+    # 但 tensorboard 是训练过程中实时写的，这样报告在训练途中也能看到曲线。
+    for run_dir in sorted(glob.glob(os.path.join(cp, "pretrain_*"))):
+        if not os.path.isdir(run_dir):
+            continue
+        cfg = load(os.path.join(run_dir, "config.json")) or {}
+        c = _curve_summary(run_dir, cfg)
+        if c["eval"]:
+            data["curves"][os.path.basename(run_dir)] = c
     for path in sorted(glob.glob(os.path.join(cp, "pretrain_*", "metrics.json"))):
         m = load(path) or {}
         cfg = load(os.path.join(os.path.dirname(path), "config.json")) or {}
@@ -146,6 +214,17 @@ def _num(v, nd: int = 4) -> str:
         return "—"
 
 
+def _points_str(ev, max_n: int = 14) -> str:
+    """把 (step, loss) 序列压成 `2k:5.116 → … → 412k:1.90` 一行；点数多时等距抽稀但保留首尾。"""
+    if not ev:
+        return "—"
+    if len(ev) > max_n:
+        step = (len(ev) - 1) / (max_n - 1)
+        idx = sorted({int(round(i * step)) for i in range(max_n)})
+        ev = [ev[i] for i in idx]
+    return " → ".join(f"{s / 1000:.1f}k:{v:.4f}" if s >= 1000 else f"{s}:{v:.4f}" for s, v in ev)
+
+
 def render(d: dict) -> str:
     L = [f"# MiniGPT 训练报告", "", f"生成时间：{d['time']}", ""]
     L += ["## 1. 预训练 run", "",
@@ -161,7 +240,30 @@ def render(d: dict) -> str:
                  f"{_split_label(r)} | "
                  f"{best} | {'✅' if r['final'] else '—'} | {'✅' if r.get('best') else '—'} |")
     if not d["pretrain"]:
-        L.append("| （暂无） | | | | | | | | |")
+        msg = "（训练进行中：`metrics.json` 在 run 结束时才落盘，实时曲线见 §1.5）" if d.get("curves") else "（暂无）"
+        L.append(f"| {msg} | | | | | | | | | |")
+
+    L += ["", "## 1.5 预训练 eval_loss 曲线与吞吐（tensorboard）", ""]
+    if d.get("curves"):
+        for run, c in sorted(d["curves"].items()):
+            ev = c["eval"]
+            vals = [v for _, v in ev]
+            lo_i = vals.index(min(vals))
+            tps, eta = c.get("tail_tok_s"), c.get("eta_hours")
+            thr = "—" if not tps else f"{tps / 1000:.1f}k tok/s"
+            prog = f"{ev[-1][0]}" + (f"/{c['max_steps']}" if c.get("max_steps") else "")
+            eta_s = "—" if eta is None else f"约 {eta:.1f} h（自 step {c.get('eta_from_step')} 起）"
+            L += [f"### {run} — 最新 step {prog}，{c['n_eval']} 个评估点", ""]
+            if len(vals) >= 2:
+                L += [f"`{_spark(vals)}`（左早右晚，最低 {min(vals):.4f} @step {ev[lo_i][0]}）", ""]
+            L += ["| 指标 | 值 |", "|---|---|",
+                  f"| 曲线 step:loss | {_points_str(ev)} |",
+                  f"| 末段吞吐（最近 500 步中位数） | {thr} |",
+                  f"| 末段 train_loss（最近 200 步均值） | {_num(c.get('tail_train_loss'))} |",
+                  f"| ETA | {eta_s} |",
+                  ""]
+    else:
+        L += ["（无 tensorboard 数据：老 run 未开 writer，或事件文件已清理）", ""]
 
     L += ["", "## 2. 同切分 perplexity 对比（同一 bin / 同一 --max-rows）", ""]
     if d["ppl"]:
