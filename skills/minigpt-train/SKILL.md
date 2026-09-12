@@ -94,18 +94,26 @@ NPROC=4 bash scripts/pretrain_start.sh --paths_output_dir models/checkpoints/pre
 | `minigpt/data/sft_dataset.py` | `InstructionDataset / collate / split_dataset` |
 | `minigpt/train/{trainer,pretrainer,sft_trainer,metrics}.py` | 训练器（AMP/梯度累积/lr 调度/eval/save/resume/DDP/compile/num_workers）、入口、TensorBoard 指标 |
 | `scripts/build_pretrain_bin.py` | 语料 → `.bin`（`build` / `info`） |
+| `scripts/audit_dataset.py` | 数据集体检（bin↔meta↔分词器对账、切分预览、SFT 泄漏/CoT 重合、token 预算；有 BLOCKER 返回 1） |
+| `scripts/audit_sft_lengths.py` | SFT 真实规模（监督 token、截断路径分布、零监督样本；CPU 约 30s） |
+| `scripts/mix_corpora.py` / `parquet_to_jsonl.py` / `clean_long_docs.py` | 语料侧：按**字符**配比混合 / parquet→jsonl（`--mix-by chars`、`--shards`）/ 长文档结构化切块 |
 | `scripts/generate.py` | 推理 CLI（`--chat --thinking --thinking-strategy single`） |
 | `scripts/evaluate_pretrain.py` | loss / perplexity（**默认 `--split val`** 走与训练同一口径的验证集） |
-| `scripts/eval_thinking.py` | 思考模式对比（plain/single/two-phase，`--repetition-penalty 1.0`） |
-| `scripts/build_cot_sft.py` | CoT 数据（`--profile easy|hard`，自带答案） |
+| `scripts/eval_thinking.py` | 思考模式对比（plain/single/two-phase + **分档准确率** `by_difficulty`，必须 `--repetition-penalty 1.0`） |
+| `scripts/chat_probe.py` | 51 场景对话质检（greedy + sampled） |
+| `scripts/build_cot_sft.py` | CoT 数据（`--profile easy` / `hard`，自带答案） |
 | `scripts/train_dashboard.py` | 看板（网页 8099 / `--once` / `--plot`；默认**自动跟随当前正在跑的 run**，含 SFT 阶段） |
-| `scripts/report_training.py` | 汇总全部 run/评测 → Markdown 报告（ppl 对比、思考模式准确率、样例；`--json` 供 agent 解析） |
+| `scripts/watch_training.sh` | 终端版看板（SSH 用；不传参自动选最新 run） |
+| `scripts/report_training.py` | 汇总全部 run/评测 → Markdown 报告（曲线+噪声、ppl 对比、思考模式准确率与分档、样例、历史基线；`--json` 供 agent 解析） |
+| `scripts/verify_v5_delivery.py` | **交付自检**（42+ 项：架构/步数/ppl 口径/报告章节/分档/样例/`.bin` 对账，缺件 exit 1；`--allow-partial` 看进度） |
 | `scripts/train_pretrain_resilient.sh` | 自愈长训（崩溃自动续训；环境变量可覆盖 OUT_DIR/DATA_BIN/PRESET_ARGS/TARGET_STEPS/NPROC） |
 | `scripts/checkpoint_janitor.sh` | 每目录保留最近 N 个 checkpoint（防磁盘写满） |
-| `scripts/run_downstream.sh` | 一键下游：SFT → CoT easy → CoT hard → 评测（自动优先 `best.pt`） |
+| `scripts/run_downstream.sh` | **通用**下游：SFT → CoT easy → CoT hard → 评测（`BASE`/`TAG` 可覆盖，自动优先 `best.pt`） |
 | `scripts/run_downstream_evals.sh` | **只跑评测/出样**（4a~4d），可单独重跑；`TAG=... bash ...` |
-| `scripts/run_downstream.sh`、`wait_and_run_downstream.sh` | SFT→CoT→评测自动接力 |
-| `tests/` | `pytest tests/ -q`（24 passed, 1 skipped） |
+| `scripts/wait_and_run_downstream.sh` | **通用接力**：等 `$OUT_DIR/final.pt` → 跑上面的通用下游（`pipeline.sh` 自动拉起；`OUT_DIR` 必须传） |
+| `scripts/watch_v5_chain.sh` | **v5 生产接力**：等 final.pt → `run_v5_downstream.sh`，并**二级监督**训练守护（双缺席 3 分钟自动拉起） |
+| 其余（按需） | `download_data.sh`、`train_tokenizer.py`、`check_env.py`/`estimate_resources.py`/`validate_pretrain.py`/`validate_ddp.py`（体检与校验）、`run_code_domain.sh`/`run_domain_compare.sh`/`run_capacity_ablation.sh`（领域与容量消融配方） |
+| `tests/` | `pytest tests/ -q`（270 passed；依赖真实 `dataset/` 的用例会自动 skip） |
 | `minigpt/README.md` | 指标面板、吞吐、看板、思考模式与实测结果 |
 
 ## 3. 各阶段标准命令

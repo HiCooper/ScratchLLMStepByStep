@@ -59,7 +59,7 @@ if [ "$DRY_RUN" = "1" ]; then
   echo "  OUT_DIR=$OUT_DIR TARGET_STEPS=$STEPS PRESET_ARGS=\"$PRESET_ARGS\" \\"
   echo "    setsid nohup bash scripts/train_pretrain_resilient.sh > $OUT_DIR.log 2>&1 &"
   echo "  # 之后："
-  echo "  bash scripts/run_downstream.sh    # SFT + 零重合 CoT 评测（TAG=$TAG）"
+  echo "  BASE=$OUT_DIR/final.pt TAG=$TAG bash scripts/run_downstream.sh   # SFT + 零重合 CoT 评测"
   echo "  bash scripts/run_domain_compare.sh"
   exit 0
 fi
@@ -72,9 +72,11 @@ log "已后台启动，日志：$OUT_DIR.log；监控：python3 scripts/train_da
 
 cat <<EOF
 
-=== 2) 训练完成后跑下游（手动执行，或等 wait_and_run_downstream.sh）===
-  TAG=$TAG bash scripts/run_downstream.sh
+=== 2) 训练完成后跑下游（手动执行，或交给通用接力自动触发）===
+  BASE=$OUT_DIR/final.pt TAG=$TAG bash scripts/run_downstream.sh
   TAG=$TAG bash scripts/run_domain_compare.sh
+  # 或者后台等 final.pt 出现自动跑（OUT_DIR 必传，否则会去等一个写死的旧目录）：
+  #   OUT_DIR=$OUT_DIR setsid nohup bash scripts/wait_and_run_downstream.sh > $OUT_DIR.downstream.log 2>&1 &
 
 === 3) 对比口径（务必用同一 --split val）===
   # 容量假设成立 => cap768 在 hard CoT 留出集上明显优于 512/10/8，且 easy 已饱和

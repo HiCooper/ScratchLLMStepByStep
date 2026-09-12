@@ -92,8 +92,9 @@ log "领域预训练完成：$OUT_DIR/final.pt"
 
 # ---------------- 3) 复跑下游（TAG=domain） ----------------
 log "=== 3) 领域基座复跑 SFT/CoT（TAG=domain）==="
-BASE="$OUT_DIR/final.pt" TAG=domain TOK="$TOK" \
-PPL_CKPTS="models/checkpoints/pretrain_v1_512/final.pt models/checkpoints/pretrain_v2_full/final.pt $OUT_DIR/final.pt" \
+# 同切分对比：通用基座 vs 领域续训基座，两者都在**领域** bin 上评（跨语料 ppl 不可比）。
+# 注意注释不能插在续行（\）中间——那会把后面的赋值和命令一起注释掉。
+BASE="$OUT_DIR/final.pt" TAG=domain TOK="$TOK" PPL_CKPTS="$BASE_CKPT $OUT_DIR/final.pt" \
   bash scripts/run_downstream.sh || { log "领域下游失败"; exit 1; }
 
 # ---------------- 4) 报告 ----------------

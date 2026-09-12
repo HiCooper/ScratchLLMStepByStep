@@ -199,7 +199,7 @@ if [ "$DRY_RUN" = "1" ]; then
   1) 数据：python3 scripts/build_pretrain_bin.py build --corpus-jsonl dataset/pretrain_t2t.jsonl --tokenizer-dir models/tokenizer_v3 --out-bin $FULL_BIN --max-lines $CORPUS_LINES
   2) 训练：OUT_DIR=$OUT_DIR LOG=$LOG_FILE DATA_BIN=$FULL_BIN NPROC=$NPROC TARGET_STEPS=$STEPS PRESET_ARGS="$PRESET_ARGS" setsid nohup bash scripts/train_pretrain_resilient.sh > $OUT_DIR.watchdog.log 2>&1 &
   3) 守护：setsid nohup bash scripts/checkpoint_janitor.sh 60 2 120 > /tmp/janitor.log 2>&1 &
-  4) 下游：setsid nohup bash scripts/wait_and_run_downstream.sh > $OUT_DIR.downstream.log 2>&1 &
+  4) 下游：OUT_DIR=$OUT_DIR setsid nohup bash scripts/wait_and_run_downstream.sh > $OUT_DIR.downstream.log 2>&1 &
   5) 看板：setsid nohup python3 scripts/train_dashboard.py --serve --port 8099 --refresh 5 --grad-clip 1.0 > /tmp/dashboard.log 2>&1 &
 EOF
   exit 0
@@ -226,7 +226,9 @@ else
 fi
 
 if [ -z "$(alive 'scripts/wait_and_run_downstream.sh')" ]; then
-  setsid nohup bash scripts/wait_and_run_downstream.sh > "$OUT_DIR.downstream.log" 2>&1 < /dev/null &
+  # 必须把 OUT_DIR 传下去：接力脚本按 $OUT_DIR/final.pt 等完成信号，
+  # 不传就会去等一个写死的、与本次预设无关的目录（等 12h 后静默退出，下游永远不会跑）。
+  OUT_DIR="$OUT_DIR" setsid nohup bash scripts/wait_and_run_downstream.sh > "$OUT_DIR.downstream.log" 2>&1 < /dev/null &
 fi
 if [ -z "$(alive 'scripts/train_dashboard.py')" ]; then
   setsid nohup python3 scripts/train_dashboard.py --serve --port 8099 --refresh 5 --grad-clip 1.0 \

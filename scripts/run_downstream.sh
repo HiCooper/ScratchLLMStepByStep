@@ -3,27 +3,55 @@
 #   1) 指令 SFT（chat）  2) CoT easy  3) CoT hard（课程式）
 #   4) 评测：调用 scripts/run_downstream_evals.sh（思考模式 easy/hard + 同切分 ppl + 问答样例）
 #
-# 参数（环境变量，均有默认值，保持与既有 v2 产物一致的命名）：
-#   BASE      起始基座 checkpoint（默认 models/checkpoints/pretrain_v2_full/final.pt）
+# 参数（环境变量；BASE/TAG 缺省时**自动选最新产出的 run**，不再写死某个早已不存在的 run）：
+#   BASE      起始基座 checkpoint（默认：models/checkpoints 下最新的 pretrain_*/final.pt，
+#             没有 final.pt 就用最新 best.pt；都没有则报错退出，不会拿错误路径硬跑）
 #   TOK       分词器目录（默认 models/tokenizer_v3）
-#   TAG       产物前缀（默认 v2；领域模型可传 domain，避免覆盖既有结果）
-#   PPL_CKPTS 参与 ppl 同切分对比的 checkpoint 列表（空格分隔）
+#   TAG       产物前缀（默认从 BASE 的目录名推导：pretrain_v5 → v5；领域模型传 domain 避免覆盖）
+#   PPL_CKPTS 参与 ppl 同切分对比的 checkpoint 列表（空格分隔；默认只含本次 BASE，
+#             要对比领域续训模型再显式追加——**跨语料 ppl 不可比**，只能同 bin 同 --split val 比）
 #   SFT_EPOCHS / COT_EASY_EPOCHS / COT_HARD_EPOCHS / SFT_LINES / COT_EASY_LINES / COT_HARD_LINES
 #
 # 用法（后台）：setsid nohup bash scripts/run_downstream.sh > models/checkpoints/downstream.log 2>&1 &
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-BASE="${BASE:-models/checkpoints/pretrain_v2_full/final.pt}"
+detect_base() {   # 最新的 pretrain run：先找有 final.pt 的，再退到有 best.pt 的
+  local d
+  for d in $(ls -dt models/checkpoints/pretrain_*/ 2>/dev/null || true); do
+    [ -f "${d}final.pt" ] && { echo "${d}final.pt"; return 0; }
+  done
+  for d in $(ls -dt models/checkpoints/pretrain_*/ 2>/dev/null || true); do
+    [ -f "${d}best.pt" ] && { echo "${d}best.pt"; return 0; }
+  done
+  return 1
+}
+
+BASE="${BASE:-}"
+if [ -z "$BASE" ]; then
+  BASE="$(detect_base || true)"
+  if [ -z "$BASE" ]; then
+    echo "❌ 未指定 BASE，且 models/checkpoints 下找不到任何 pretrain_*/final.pt|best.pt。" >&2
+    echo "   用法：BASE=models/checkpoints/<run>/final.pt TAG=<tag> bash scripts/run_downstream.sh" >&2
+    exit 1
+  fi
+  echo "[downstream] 未指定 BASE，自动选用最新 run：$BASE"
+fi
 TOK="${TOK:-models/tokenizer_v3}"
-TAG="${TAG:-v2}"
+if [ -z "${TAG:-}" ]; then
+  TAG="$(basename "$(dirname "$BASE")")"
+  TAG="${TAG#pretrain_}"
+  echo "[downstream] 未指定 TAG，按 BASE 推导：$TAG"
+fi
 SFT_EPOCHS="${SFT_EPOCHS:-2}"
 COT_EASY_EPOCHS="${COT_EASY_EPOCHS:-2}"
 COT_HARD_EPOCHS="${COT_HARD_EPOCHS:-3}"
 SFT_LINES="${SFT_LINES:-60000}"
 COT_EASY_LINES="${COT_EASY_LINES:-60000}"
 COT_HARD_LINES="${COT_HARD_LINES:-80000}"
-PPL_CKPTS="${PPL_CKPTS:-models/checkpoints/pretrain_v1_512/final.pt models/checkpoints/pretrain_v2_full/final.pt}"
+# 默认只评本次用的基座：以前的默认值写死了 pretrain_v1_512/pretrain_v2_full 两个
+# 早已不存在的路径，跑起来只会得到两条"文件不存在"的噪声。
+PPL_CKPTS="${PPL_CKPTS:-$BASE}"
 
 CHAT="models/checkpoints/sft_${TAG}_chat"
 COT_EASY="models/checkpoints/sft_${TAG}_cot_easy"

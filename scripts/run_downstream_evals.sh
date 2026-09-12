@@ -24,8 +24,12 @@ cd "$(dirname "$0")/.."
 TAG="${TAG:-v2}"
 TOK="${TOK:-models/tokenizer_v3}"
 N="${N:-60}"
-PPL_CKPTS="${PPL_CKPTS:-models/checkpoints/pretrain_v1_512/final.pt models/checkpoints/pretrain_v2_full/final.pt}"
-BIN="${BIN:-dataset/bins/pretrain_v4_full.bin}"
+# 空 = 跳过 4c。旧默认写死 pretrain_v1_512/pretrain_v2_full 两个早已不存在的路径，
+# 每次跑都只会打印两条"跳过不存在的"噪声；要对比就显式传，且必须同 bin 同 --split val。
+PPL_CKPTS="${PPL_CKPTS:-}"
+# 默认评测语料用仓库当前基线 v5（纯通用 v4 只在做"加结构化成分"的 A/B 时才用）。
+# 注意口径：ppl 只在**同一 bin、同一 --split val** 下可比。
+BIN="${BIN:-dataset/bins/pretrain_v5_full.bin}"
 
 CHAT="models/checkpoints/sft_${TAG}_chat"
 COT_EASY="models/checkpoints/sft_${TAG}_cot_easy"
@@ -74,17 +78,22 @@ else
   log "跳过：$COT_HARD 下没有 best.pt / final.pt"
 fi
 
-log "=== 4c) 同切分 ppl 对比：$PPL_CKPTS ==="
-for ck in $PPL_CKPTS; do
-  [ -f "$ck" ] || { log "跳过不存在的 $ck"; continue; }
-  name=$(basename "$(dirname "$ck")")
-  # --split val：评估 bin 尾部连续、对齐文档边界的验证集（与训练同一口径）。
-  # 旧写法 --max-rows 512 取的是 bin 最前面的窗口，若该 bin 参与过训练，
-  # 得到的是训练 loss，会严重高估泛化（历史 README 结论即因此失真）。
-  python3 -u scripts/evaluate_pretrain.py --checkpoint "$ck" --tokenizer-dir "$TOK" \
-    --bin "$BIN" --split val --batch-size 8 \
-    --output "models/checkpoints/ppl_${name}.json" || log "4c $name 失败（继续）"
-done
+if [ -z "$PPL_CKPTS" ]; then
+  log "=== 4c) 未提供 PPL_CKPTS，跳过同切分 ppl 对比 ==="
+  log "    （要对比请传 PPL_CKPTS=\"<ckpt1> <ckpt2>\"；必须同 bin 同 --split val，跨语料不可比）"
+else
+  log "=== 4c) 同切分 ppl 对比（bin=$BIN）：$PPL_CKPTS ==="
+  for ck in $PPL_CKPTS; do
+    [ -f "$ck" ] || { log "跳过不存在的 $ck"; continue; }
+    name=$(basename "$(dirname "$ck")")
+    # --split val：评估 bin 尾部连续、对齐文档边界的验证集（与训练同一口径）。
+    # 旧写法 --max-rows 512 取的是 bin 最前面的窗口，若该 bin 参与过训练，
+    # 得到的是训练 loss，会严重高估泛化（历史 README 结论即因此失真）。
+    python3 -u scripts/evaluate_pretrain.py --checkpoint "$ck" --tokenizer-dir "$TOK" \
+      --bin "$BIN" --split val --batch-size 8 \
+      --output "models/checkpoints/ppl_${name}.json" || log "4c $name 失败（继续）"
+  done
+fi
 
 log "=== 4d) 中文问答样例（TAG=$TAG）==="
 CK=$(pick "$CHAT")
