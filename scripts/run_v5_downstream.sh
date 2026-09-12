@@ -172,4 +172,23 @@ log "全部阶段结束"
     [ -f "$CP/$f.json" ] && echo "- $f: \`$(head -c 300 "$CP/$f.json" | tr -d '\n')\`"
   done
 } >> "$SUMMARY" 2>&1
-log "完成。SUMMARY: $SUMMARY"
+
+# ── ⑧ 交付自检（最后一步，且写进 SUMMARY 末尾——用户/agent 第一眼就能看到"齐了没有"）
+# 前面的 stage 都是"失败也继续"，所以必须有一步把散落各阶段的产物合起来判一次总账：
+# 少了 SFT 或评测文件时，日志里只是几行 ❌，很容易被忽略成"训练好了"。
+verify_rc=0
+log "▶ 交付自检（scripts/verify_v5_delivery.py）"
+python3 scripts/verify_v5_delivery.py > "$OUT/verify.log" 2>&1 || verify_rc=$?
+if [ "$verify_rc" -eq 0 ]; then
+  log "✅ 交付自检全部通过"
+  echo "- ✅ 交付自检全部通过（明细 \`$OUT/verify.log\`）" >> "$SUMMARY"
+else
+  log "❌ 交付自检未通过（rc=$verify_rc），详见 $OUT/verify.log"
+  {
+    echo "- ❌ 交付自检未通过，缺失/异常项："
+    grep -E "❌" "$OUT/verify.log" | sed 's/^/    /' || echo "    （详见 verify.log）"
+  } >> "$SUMMARY" 2>&1
+fi
+
+log "完成。SUMMARY: $SUMMARY（自检 rc=$verify_rc）"
+exit "$verify_rc"

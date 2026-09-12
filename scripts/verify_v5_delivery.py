@@ -84,16 +84,21 @@ class Checker:
         self.add((m.get("best_eval_loss") is not None) and (m.get("best_step") is not None),
                  "基座记录 best_eval_loss@step",
                  f"{m.get('best_eval_loss')}@{m.get('best_step')}")
-        # .bin 对账：metrics 里记的 bin token 数必须与磁盘 meta 一致
-        meta_path = os.path.join(self.dataset, "bins", "pretrain_v5_full.bin.meta.json")
+        # .bin 对账：metrics 里记的 bin 信息必须与磁盘 meta 一致
+        # （注意真实键名：meta 文件是 `*.meta.json`（不是 `*.bin.meta.json`），里面是
+        #   `tokens`/`vocab_size`；metrics.bin_meta 来自 validate_bin_tokenizer，
+        #   键是 `bin_tokens`/`bin_vocab`。fixture 与真实产物不一致会让自检假红。）
+        meta_path = os.path.join(self.dataset, "bins", "pretrain_v5_full.meta.json")
         meta = _load(meta_path)
         bm = m.get("bin_meta") or {}
-        if meta and bm:
-            self.add(meta.get("tokens") == bm.get("tokens") and meta.get("vocab") == bm.get("bin_vocab"),
+        if meta and bm.get("checked"):
+            self.add(meta.get("tokens") == bm.get("bin_tokens")
+                     and meta.get("vocab_size") == bm.get("bin_vocab"),
                      ".bin 与 metrics 记录的 token/vocab 对账",
-                     f"disk={meta.get('tokens')}/{meta.get('vocab')} metrics={bm.get('tokens')}/{bm.get('bin_vocab')}")
+                     f"disk={meta.get('tokens')}/{meta.get('vocab_size')} "
+                     f"metrics={bm.get('bin_tokens')}/{bm.get('bin_vocab')}")
         else:
-            self.note("跳过 .bin 对账", f"缺少 {meta_path} 或 metrics.bin_meta")
+            self.note("跳过 .bin 对账", f"缺少 {meta_path} 或 bin_meta 未校验")
         return m
 
     def check_run(self, run: str, label: str, expect_step: int | None = None) -> None:
@@ -114,7 +119,12 @@ class Checker:
         ppl = _load(os.path.join(self.cp, "ppl_v5_general.json"))
         self.add(ppl is not None, "ppl_v5_general.json 存在")
         if ppl:
-            self.add(ppl.get("split") == "val", "ppl 用 --split val 口径", str(ppl.get("split")))
+            # evaluate_pretrain.py 写的 `split` 是 split_train_eval_blocks 返回的 **dict**
+            # （{"split": "blocked-document-aligned", "n_blocks": ...}），不是字符串
+            sp = ppl.get("split")
+            sp_name = sp.get("split") if isinstance(sp, dict) else sp
+            self.add(sp_name in ("val", "blocked-document-aligned"),
+                     "ppl 用 --split val 口径", f"{sp_name}（{sp.get('n_blocks') if isinstance(sp, dict) else '-'} 块）")
             self.add("pretrain_v5_full.bin" in str(ppl.get("bin")), "ppl 评的是 v5 bin", str(ppl.get("bin")))
             self.add(isinstance(ppl.get("perplexity"), (int, float))
                      and math.isfinite(ppl["perplexity"]), "ppl 有限", str(ppl.get("perplexity")))

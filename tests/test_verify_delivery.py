@@ -31,12 +31,22 @@ def _touch(path):
 
 
 def _make_tree(cp: str, ds: str, eval_loss: float = 2.70) -> None:
+    """按**真实产物**的 schema 造 fixture。
+
+    踩过的坑：第一版 fixture 是照"我以为的字段"写的（`*.bin.meta.json` + `vocab`、
+    `split` 写成字符串），于是自检脚本里同样写错的三个断言全都"通过"——测试和实现
+    一起错。现在字段名一律照抄真实文件：
+      - `dataset/bins/pretrain_v5_full.meta.json`（不是 `*.bin.meta.json`），键是 `vocab_size`
+      - `metrics.bin_meta` 来自 validate_bin_tokenizer，键是 `bin_tokens` / `bin_vocab`
+      - `ppl.split` 是 dict：`{"split": "blocked-document-aligned", "n_blocks": ...}`
+    """
     ev = eval_loss
     _w(os.path.join(cp, "pretrain_v5", "metrics.json"), {
         "step": 412000, "epoch": 0, "train_loss": 2.6, "eval_loss": ev,
         "perplexity": math.exp(ev), "best_eval_loss": ev, "best_step": 410000,
-        "data_split": {"split": "blocked-document-aligned", "n_blocks": 500, "eval_rows": 500},
-        "bin_meta": {"tokens": 1691885203, "bin_vocab": 32000},
+        "data_split": {"split": "blocked-document-aligned", "n_blocks": 511, "eval_rows": 512},
+        "bin_meta": {"checked": True, "bin_vocab": 32000, "bin_tokens": 1691885203,
+                     "tokenizer_vocab": 32000},
     })
     _w(os.path.join(cp, "pretrain_v5", "config.json"), {
         "model": {"model_emb_dim": 512, "model_n_layers": 10, "model_n_heads": 8,
@@ -45,16 +55,19 @@ def _make_tree(cp: str, ds: str, eval_loss: float = 2.70) -> None:
     })
     _touch(os.path.join(cp, "pretrain_v5", "final.pt"))
     _touch(os.path.join(cp, "pretrain_v5", "best.pt"))
-    _w(os.path.join(ds, "bins", "pretrain_v5_full.bin.meta.json"),
-       {"tokens": 1691885203, "vocab": 32000})
+    _w(os.path.join(ds, "bins", "pretrain_v5_full.meta.json"),
+       {"dtype": "uint16", "lines": 6974328, "tokens": 1691885203, "vocab_size": 32000,
+        "eos_id": 2})
     for run, step in (("sft_v5_chat", 10000), ("sft_v5_cot_easy", 15000), ("sft_v5_cot_hard", 20000)):
         _w(os.path.join(cp, run, "metrics.json"),
            {"step": step, "train_loss": 1.0, "eval_loss": 1.1, "best_eval_loss": 1.0,
             "best_step": step - 500})
         _touch(os.path.join(cp, run, "best.pt"))
     _w(os.path.join(cp, "ppl_v5_general.json"),
-       {"eval_loss": 2.7, "perplexity": math.exp(2.7), "split": "val",
-        "bin": "dataset/bins/pretrain_v5_full.bin", "rows": 500, "max_rows": 0})
+       {"eval_loss": 2.7, "perplexity": math.exp(2.7),
+        "split": {"split": "blocked-document-aligned", "n_blocks": 511, "eval_rows": 512},
+        "bin": "dataset/bins/pretrain_v5_full.bin", "rows": 512, "max_rows": 0,
+        "bin_vocab": 32000})
     for name in ("eval_v5_cot_easy", "eval_v5_cot_hard"):
         _w(os.path.join(cp, f"{name}.json"),
            {"summary": {"n": 200, "accuracy": {"plain": 0.31, "single": 0.28}}})
