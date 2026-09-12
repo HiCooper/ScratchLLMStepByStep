@@ -16,6 +16,7 @@ import glob
 import json
 import os
 import re
+import statistics
 import subprocess
 import time
 from datetime import datetime
@@ -103,6 +104,34 @@ def resolve_run(args, scan_bytes=2_000_000):
     return best, out, os.path.basename(best)
 
 
+def _rate_from_evals(evals, tokens_per_step, max_gap_factor=3.0):
+    """从相邻评估点估计速率；**排除重启/停机造成的巨大空档**。
+
+    真实事故：机器重启后第一次评估进来时，最后两个点的间隔含 5 小时停机
+    （21:47 的 step 76000 → 23:0x 的 80000），看板立刻显示 "1.7k tok/s / ETA 219h"，
+    要等下一个评估点才自愈。做法：取最近若干个区间的 s/step 中位数，
+    明显偏离中位数（>3×）的区间视为停机造成的、丢弃。
+
+    只有两个评估点时无从判断（没有中位数可依），只能照用——此时刚重启后的第一次
+    估计仍可能偏大，属已知局限。
+    """
+    def _ts(x):
+        return time.mktime(time.strptime(x["ts"], "%Y-%m-%d %H:%M:%S"))
+
+    pairs = []
+    recent = evals[-6:]                     # 配对必须是 (x[i], x[i+1] identical slice 会配到自己)
+    for a, b in zip(recent, recent[1:]):
+        dsteps, dt = b["step"] - a["step"], _ts(b) - _ts(a)
+        if dsteps > 0 and dt > 0:
+            pairs.append(dt / dsteps)
+    if not pairs:
+        return None
+    med = statistics.median(pairs)
+    good = [p for p in pairs if p <= med * max_gap_factor]
+    s = statistics.median(good or pairs)
+    return {"s_per_step": s, "tok_per_s": tokens_per_step / s}
+
+
 def _configured_max_steps(out_dir, cache={}):
     """从 run 的 config.json 读取 train.max_steps（0 表示未设置）。按 mtime 做轻量缓存。"""
     path = os.path.join(out_dir, "config.json")
@@ -134,14 +163,7 @@ def snapshot(args):
     data["restarts"] = max(data.get("restarts", 0), wd.get("restarts", 0))
     evals = data["evals"]
     last = evals[-1] if evals else None
-    rate = None
-    if len(evals) >= 2:
-        a, b = evals[-2], evals[-1]
-        t0 = time.mktime(time.strptime(a["ts"], "%Y-%m-%d %H:%M:%S"))
-        t1 = time.mktime(time.strptime(b["ts"], "%Y-%m-%d %H:%M:%S"))
-        dsteps, dt = b["step"] - a["step"], max(t1 - t0, 1e-6)
-        if dsteps > 0:
-            rate = {"s_per_step": dt / dsteps, "tok_per_s": dsteps * args.tokens_per_step / dt}
+    rate = _rate_from_evals(evals, args.tokens_per_step)
     step = last["step"] if last else 0
     # 目标步数优先级：显式 --target-step > run 的 config.json:train.max_steps > 日志里的总步数。
     # 必须看 max_steps：领域增量续训时 epochs*每epoch步数 会远大于实际目标，进度/ETA 会算错。
