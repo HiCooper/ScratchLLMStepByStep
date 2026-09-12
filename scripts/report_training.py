@@ -170,7 +170,8 @@ def collect(cp: str | None = None):
     """扫描 checkpoints 目录并汇总（cp 可指定，便于测试）。"""
     cp = cp or os.path.join(ROOT, "models", "checkpoints")
     data = {"time": datetime.now().strftime("%F %T"), "pretrain": [], "sft": [],
-            "thinking": {}, "ppl": {}, "samples": {}, "success_rate": {}, "curves": {}}
+            "thinking": {}, "ppl": {}, "samples": {}, "success_rate": {},
+            "curves": {}, "sft_curves": {}}
     # 曲线独立于 metrics.json 扫描：metrics.json 只在训练结束才落盘，
     # 但 tensorboard 是训练过程中实时写的，这样报告在训练途中也能看到曲线。
     for run_dir in sorted(glob.glob(os.path.join(cp, "pretrain_*"))):
@@ -180,6 +181,15 @@ def collect(cp: str | None = None):
         c = _curve_summary(run_dir, cfg)
         if c["eval"]:
             data["curves"][os.path.basename(run_dir)] = c
+    # SFT/CoT 阶段同样写了 tensorboard（sft_trainer 会建 SummaryWriter），
+    # 交付要求里的"各阶段 eval_loss 曲线"因此可以逐阶段给出来，而不是只有基座。
+    for run_dir in sorted(glob.glob(os.path.join(cp, "sft_*"))):
+        if not os.path.isdir(run_dir):
+            continue
+        cfg = load(os.path.join(run_dir, "config.json")) or {}
+        c = _curve_summary(run_dir, cfg)
+        if c["eval"]:
+            data["sft_curves"][os.path.basename(run_dir)] = c
     for path in sorted(glob.glob(os.path.join(cp, "pretrain_*", "metrics.json"))):
         m = load(path) or {}
         cfg = load(os.path.join(os.path.dirname(path), "config.json")) or {}
@@ -341,6 +351,24 @@ def render(d: dict) -> str:
                  f"{best} | {'✅' if r['final'] else '—'} | {'✅' if r.get('best') else '—'} |")
     if not d["sft"]:
         L.append("| （暂无） | | | | | | |")
+
+    L += ["", "## 3.5 SFT / CoT 阶段 eval_loss 曲线（tensorboard）", "",
+          "> 曲线直接取自各 run 的 tensorboard，训练途中也会实时出现；"
+          "点数多时等距抽稀（保留首尾）。这些 run 的验证集是各自 SFT 数据的 1% 切分，"
+          "与基座的语言建模 val 不是一回事，**不要跨阶段比 loss 绝对值**。", ""]
+    if d.get("sft_curves"):
+        for run, c in sorted(d["sft_curves"].items()):
+            ev = c["eval"]
+            vals = [v for _, v in ev]
+            lo_i = vals.index(min(vals))
+            L += [f"**{run}** — 最新 step {ev[-1][0]:,}，{c['n_eval']} 个评估点"
+                  f"（最低 {min(vals):.4f} @step {ev[lo_i][0]}）", ""]
+            if len(vals) >= 2:
+                L += [f"`{_spark(vals)}`（左早右晚）", ""]
+            L += [f"| 曲线 step:loss | {_points_str(ev)} |", "|---|---|",
+                  f"| 末段 train_loss（最近 200 步均值） | {_num(c.get('tail_train_loss'))} |", ""]
+    else:
+        L.append("（尚未产出：等待下游 SFT/CoT 阶段）")
 
     L += ["", "## 4. 思考模式准确率（留出集，贪心 + repetition_penalty=1.0）", ""]
     if d["thinking"]:

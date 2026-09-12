@@ -76,7 +76,7 @@ def _make_tree(cp: str, ds: str, eval_loss: float = 2.70) -> None:
     _w(os.path.join(cp, "samples_v5_chat_probe.txt"), "场景 1\n回复：" + "好" * 400)
     _w(os.path.join(cp, "TRAINING_REPORT_v5.md"),
        "# MiniGPT 训练报告\n## 1.5 曲线\n| 曲线 step:loss | 2.0k:5.1 |\n"
-       "## 4.5 分档\n## 6. 历史基线对照\nbest.pt\n")
+       "## 3.5 SFT/CoT 曲线\n## 4.5 分档\n## 6. 历史基线对照\nbest.pt\n")
     _w(os.path.join(cp, "downstream_v5", "SUMMARY.md"), "- ✅ 全部")
 
 

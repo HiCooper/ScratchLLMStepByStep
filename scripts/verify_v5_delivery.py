@@ -153,6 +153,7 @@ class Checker:
             return
         txt = open(rep, encoding="utf-8").read()
         for need, why in (("## 1.5", "eval_loss 曲线/吞吐/ETA 章节"),
+                          ("## 3.5", "SFT/CoT 阶段曲线章节"),
                           ("## 4.5", "CoT 分档准确率章节"),
                           ("## 6.", "历史基线对照章节"),
                           ("step:loss", "曲线数据点"),

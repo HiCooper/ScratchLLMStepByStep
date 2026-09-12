@@ -131,3 +131,21 @@ def test_token_matched_comparison_requires_close_budget():
     # 历史行与说明必须在
     assert "| `pretrain_v2_full`（历史，文档记录） | 211,000 |" in reached
     assert "这不是 A/B 结论" in reached and "同一 bin、同一 `--split val`" in reached
+
+
+def test_sft_stage_curves_are_rendered():
+    """交付要求里的"各阶段 eval_loss 曲线"——不能只有基座有曲线。"""
+    d = _base_dict({})
+    d["sft_curves"] = {
+        "sft_v5_chat": {"eval": [(200, 1.5), (2000, 1.2), (9800, 0.95)],
+                        "tail_train_loss": 0.93, "n_eval": 3},
+        "sft_v5_cot_easy": {"eval": [(200, 1.1), (14700, 0.62)],
+                            "tail_train_loss": 0.60, "n_eval": 2},
+    }
+    md = render(d)
+    assert "## 3.5" in md
+    assert "**sft_v5_chat** — 最新 step 9,800" in md and "最低 0.9500 @step 9800" in md
+    assert "| 曲线 step:loss | 200:1.5000 → 2.0k:1.2000 → 9.8k:0.9500 |" in md
+    assert "**sft_v5_cot_easy**" in md
+    # 没有下游曲线时给出提示而不是空表
+    assert "尚未产出：等待下游 SFT/CoT 阶段" in render(_base_dict({}))

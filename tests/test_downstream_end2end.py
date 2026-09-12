@@ -60,6 +60,13 @@ def sandbox(tmp_path):
     for step in range(0, 412000, 20000):
         w.add_scalar("train/loss", 2.6, step)
         w.add_scalar("train/tokens_per_sec", 24000.0, step)
+    for run in ("sft_v5_chat", "sft_v5_cot_easy", "sft_v5_cot_hard"):
+        sd = sb / "models" / "checkpoints" / run
+        w2 = SummaryWriter(str(sd / "tensorboard"))
+        for step, loss in ((200, 1.5), (4000, 1.1)):
+            w2.add_scalar("eval/loss", loss, step)
+            w2.add_scalar("train/loss", 1.2, step)
+        w2.close()
     w.close()
     shim = sb / "bin" / "python3"
     shim.write_text(SHIM.replace("__SB__", str(sb)).replace("__REAL__", ROOT)
@@ -85,11 +92,12 @@ def test_driver_runs_all_stages_and_passes_selfcheck(sandbox):
     assert r.returncode == 0, f"自检应通过但 rc={r.returncode}\n{r.stdout[-1500:]}"
 
     report = (sandbox / "models/checkpoints/TRAINING_REPORT_v5.md").read_text(encoding="utf-8")
-    for sect in ("## 1.", "## 1.5", "## 4.5", "## 5.", "## 6."):
+    for sect in ("## 1.", "## 1.5", "## 3.5", "## 4.5", "## 5.", "## 6."):
         assert sect in report, f"报告缺少 {sect}"
     # 曲线来自上面写的真实 tensorboard 事件 → §1.5 有数据点、§6 有同预算点对比
     assert "| 曲线 step:loss |" in report and "2.0k:5.1100" in report
     assert "同预算点对比" in report and "| `pretrain_v5`（本次，同预算点） | 210,000 |" in report
+    assert "**sft_v5_cot_hard**" in report      # 真实采集到了 SFT/CoT 阶段的曲线
     # 各阶段的日志文件都应有落盘（stage() 的第一个动作就是重定向）
     out = sandbox / "models/checkpoints/downstream_v5"
     for log in ("sft.log", "cot_easy.log", "cot_hard.log", "ppl_v5.log", "chat_probe.log"):
