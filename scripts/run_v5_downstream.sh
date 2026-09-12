@@ -10,7 +10,8 @@
 # 日志与 SUMMARY 另放 downstream_v5/，避免与 run 目录混在一起。
 #
 # 设计依据（references/data-distribution.md）：
-#   - SFT 抽 4 万条 × 2 epoch（10 万条 / 21.2M 监督 token 对 47.9M 模型偏多，易过拟合）
+#   - SFT 抽 4 万条 × 2 epoch = 8 万样本 / **实测 14.5M 监督 token**（scripts/audit_sft_lengths.py；
+#     旧注释写的"10 万条 / 21.2M"两处都估错了），对 47.9M 模型约 0.3 token/参数，量级合适
 #   - CoT easy 用 --easy-max 50：唯一题目 45200（easy-max 9 只有 1063）→ 重复率 56×→1.33×
 #   - 算术评测必须 --repetition-penalty 1.0
 #

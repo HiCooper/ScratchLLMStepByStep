@@ -48,15 +48,23 @@ jsonl 保留的意义：换 tokenizer、换 ctx、或想改配比时，重新 to
 | **② 领域续训·代码** | `bins/domain_code70_general30.bin`<br>退火档 `bins/domain_code50_general50.bin` | `BAAI/IndustryCorpus2` → `computer_programming_code/{chinese,english}/high`（70%）<br>+ `gongjy/minimind_dataset`（30%，防遗忘复放） | 1.014 亿 tokens<br>退火档 1.029 亿 |
 | **② 领域续训·中文金融** | `bins/finance_corpus.bin` | `BAAI/IndustryCorpus2` → `finance_economics/chinese/high`（70%）<br>+ `gongjy/minimind_dataset`（30%） | 1.279 亿 tokens |
 | **② 长文档续训·英文数学** | `bins/math_clean.bin` | `BAAI/IndustryCorpus2_mathematics_statistics` → `english/high`(85 分片) + `chinese/high`(1) | 1.206 亿 tokens<br>（清洗切块后 196,090 条） |
-| **③ SFT 指令微调** | `sft/sft_data_zh.jsonl` | `BelleGroup/train_3.5M_CN` | 10 万条 / 21.2M 监督 token |
-| **④ CoT 训练** | `sft/sft_cot_easy_disjoint60k.jsonl`<br>`sft/sft_cot_hard_80k.jsonl` | 合成：`scripts/build_cot_sft.py`（算术题面）<br>+ 25% 混入 `BelleGroup` 通用指令 | 6 万条 + 8 万条 |
-| **⑤ 评测·CoT** | `sft/cot_eval_easy_disjoint.jsonl`<br>`sft/cot_eval_hard_disjoint.jsonl` | 合成，与训练集**零重合**（实测 0/200） | 各 200 条 |
+| **③ SFT 指令微调** | `sft/sft_data_zh.jsonl`（取**前 4 万条** × 2 epoch） | `BelleGroup/train_3.5M_CN` | 文件 10 万条；<br>实跑 8 万样本 / **实测 14.5M 监督 token** |
+| **④ CoT 训练** | `sft/sft_cot_easy_em50_60k.jsonl`（easy）<br>`sft/sft_cot_hard_80k.jsonl`（hard） | 合成：`scripts/build_cot_sft.py`（算术题面，`--easy-max 50`）<br>+ 25% 混入 `BelleGroup` 通用指令 | 6 万条 + 8 万条 |
+| **⑤ 评测·CoT** | `sft/cot_eval_easy_em50_disjoint.jsonl`<br>`sft/cot_eval_hard_disjoint.jsonl` | 合成，与训练集**零重合**（实测 0/200） | 各 200 条 |
 | **⑤ 评测·对话** | `../eval_sets/chat_scenarios_zh.jsonl` | 本仓库手工构造 | 51 场景 |
 | **⑤ 评测·语言建模** | 上表各 `.bin` 的 `--split val` 切分 | 同各自来源 | 443–513 窗（22–51 万 tokens） |
 | 链路验证（**非训练**） | `debug/pretrain_head.bin` | `pretrain_t2t.jsonl` 前 2000 行 | 2,000 行 / 280,992 tokens |
 | notebook 12（**与本模型训练无关**） | `smsspam.txt` | SMS Spam Collection | 5,574 行 |
 
 - ② 的三行是**互斥候选**：按是否有该领域的交付需求选一个，不是串联。
+- ③ 的 14.5M 是**实测**（`python scripts/audit_sft_lengths.py`，对前 4 万条按 ctx512 真跑一遍
+  `InstructionDataset`）：40k 条 1 epoch = 7.27M 监督 token，×2 epoch = 14.5M。
+  此前文档里的 "21.2M / 10 万条" 是估错的两处：40k×2 = **8 万**样本（不是 10 万）、
+  监督 token 也高估了约 46%。同一实测还确认 **零监督样本 = 0**（96.1% 原样放得下，
+  3.0% 需保留最后一轮回复、0.9% 需截 prompt），即"右截断把回复切掉"的老问题在真实数据上已被修掉。
+- ④⑤ 的 CoT easy 用 `_em50_` 版本（`--easy-max 50`：唯一题目 45,200 条、重复率 1.33×）；
+  旧的 `sft_cot_easy_disjoint60k.jsonl` / `cot_eval_easy_disjoint.jsonl`（`--easy-max 9`，
+  唯一题目仅 1,063 条、重复 56×）已被取代，仅作来源留档。
 - `bins/pretrain_v4_full.bin`（纯通用、同 token 预算）保留作 **A/B 对照组**，用来隔离"加结构化成分"的效果；
   它不是训练必需项，`audit_dataset.py` 已把它排除在可用语料统计之外。
 

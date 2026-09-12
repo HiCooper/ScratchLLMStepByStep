@@ -43,7 +43,7 @@ bash scripts/download_data.sh          # 下载到 dataset/
 |---|---|---|
 | 分词器训练 + 预训练（通用） | `pretrain_t2t.jsonl` | ~7.9GB（846.9 万行 / 3.24G 字符 ≈ 16.9 亿 tokens） |
 | 预训练（结构化 20%） | `chinese_cosmopedia`（教科书体） | 8/64 分片 |
-| SFT | `sft_data_zh.jsonl` | 10 万条 |
+| SFT | `sft_data_zh.jsonl` | 10 万条（训练取前 4 万条 × 2 epoch） |
 
 > **各训练阶段用到哪些数据源、规模多大、怎么生成** → 见 [`dataset/README.md`](./dataset/README.md)（唯一详述处）。
 
