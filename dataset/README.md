@@ -50,7 +50,7 @@ jsonl 保留的意义：换 tokenizer、换 ctx、或想改配比时，重新 to
 | **② 长文档续训·英文数学** | `bins/math_clean.bin` | `BAAI/IndustryCorpus2_mathematics_statistics` → `english/high`(85 分片) + `chinese/high`(1) | 1.206 亿 tokens<br>（清洗切块后 196,090 条） |
 | **③ SFT 指令微调** | `sft/sft_data_zh.jsonl`（取**前 4 万条** × 2 epoch） | `BelleGroup/train_3.5M_CN` | 文件 10 万条；<br>实跑 8 万样本 / **实测 14.5M 监督 token** |
 | **④ CoT 训练** | `sft/sft_cot_easy_em50_60k.jsonl`（easy）<br>`sft/sft_cot_hard_80k.jsonl`（hard） | 合成：`scripts/build_cot_sft.py`（算术题面，`--easy-max 50`）<br>+ 25% 混入 `BelleGroup` 通用指令 | 6 万条 + 8 万条 |
-| **⑤ 评测·CoT** | `sft/cot_eval_easy_em50_disjoint.jsonl`<br>`sft/cot_eval_hard_disjoint.jsonl` | 合成，与训练集**零重合**（实测 0/200） | 各 200 条 |
+| **⑤ 评测·CoT** | `sft/cot_eval_easy_em50_disjoint.jsonl`<br>`sft/cot_eval_hard_disjoint.jsonl` | 合成，与训练集**零重合**（实测：题面级 0/200，抽出算式再比也 0/194 与 0/135） | 各 200 条 |
 | **⑤ 评测·对话** | `../eval_sets/chat_scenarios_zh.jsonl` | 本仓库手工构造 | 51 场景 |
 | **⑤ 评测·语言建模** | 上表各 `.bin` 的 `--split val` 切分 | 同各自来源 | 443–513 窗（22–51 万 tokens） |
 | 链路验证（**非训练**） | `debug/pretrain_head.bin` | `pretrain_t2t.jsonl` 前 2000 行 | 2,000 行 / 280,992 tokens |

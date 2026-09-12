@@ -262,32 +262,58 @@ def audit_sft(tok, do_scan: bool) -> None:
 
 
 def audit_cot_disjoint(do_scan: bool) -> None:
-    """CoT 训练集 vs 评测集的题目重合度（仓库声称 disjoint 版本为 0）。"""
+    """CoT 训练集 vs 评测集的题目重合度（仓库声称 disjoint 版本为 0）。
+
+    两个口径都要过：
+
+    1. **题面级**：instruction+input 归一化后完全相同；
+    2. **算式级**：抽出 `请计算 <算式> 等于多少` 里的算式再比。只比题面是不够的——
+       题面模板只要改一个字（"请计算"→"计算一下"）题面级就"零重合"，但题目还是同一道；
+       实测旧留出集 vs 新训练集在题面级是 38.5% 重合，说明这个口径确实抓得住污染。
+       反过来只用"把所有数字抠出来"这种糙口径会误报：通用指令里出现的 "35" 会和
+       应用题里的 3 和 5 撞车（实测就产生过 1 条假重合），所以按模板抽算式。
+
+    只审**链路实际使用**的两对。旧的 `sft_cot_easy_disjoint60k / cot_eval_easy_disjoint`
+    （`--easy-max 9`）已被 `_em50_` 版本取代，不再审：继续审它只会让体检长期变红，
+    反而把真信号淹掉（它已被 `dataset/README.md` 记为"已取代，仅作来源留档"）。
+    """
     sft_dir = ROOT / "dataset" / "sft"
-    pairs = [("sft_cot_easy_disjoint60k.jsonl", "cot_eval_easy_disjoint.jsonl"),
+    pairs = [("sft_cot_easy_em50_60k.jsonl", "cot_eval_easy_em50_disjoint.jsonl"),
              ("sft_cot_hard_80k.jsonl", "cot_eval_hard_disjoint.jsonl")]
     if not do_scan:
         return
+    expr_re = re.compile(r"^请计算\s*(.+?)\s*等于多少")
+
+    def keys(path):
+        """返回 (题面级集合, 算式级集合)。"""
+        full, expr = set(), set()
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                o = json.loads(line)
+                s = (o.get("instruction") or "") + (o.get("input") or "")
+                full.add(re.sub(r"\s+", "", s))
+                m = expr_re.match((o.get("instruction") or "").strip())
+                if m:
+                    expr.add(re.sub(r"\s+", "", m.group(1)))
+        return full, expr
+
     for train_name, eval_name in pairs:
         tp, ep = sft_dir / train_name, sft_dir / eval_name
         if not (tp.exists() and ep.exists()):
             continue
-        def keys(path):
-            out = set()
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    if line.strip():
-                        o = json.loads(line)
-                        out.add(re.sub(r"\s+", "", (o.get("instruction") or "") + (o.get("input") or "")))
-            return out
-        train_keys, eval_keys = keys(tp), keys(ep)
-        hit = len(eval_keys & train_keys)
-        rate = hit / max(1, len(eval_keys))
+        tr_full, tr_expr = keys(tp)
+        ev_full, ev_expr = keys(ep)
+        hit = len(ev_full & tr_full)
+        expr_hit = len(ev_expr & tr_expr)
+        rate = hit / max(1, len(ev_full))
+        detail = (f"与 {train_name}：题面级 {hit}/{len(ev_full)}（{rate:.1%}），"
+                  f"算式级 {expr_hit}/{len(ev_expr)}")
         if "disjoint" in eval_name:
-            (add("OK", f"cot-disjoint:{eval_name}", f"与 {train_name} 重合 {hit}/{len(eval_keys)}（{rate:.1%}）")
-             if hit == 0 else
-             add("BLOCKER", f"cot-disjoint:{eval_name}",
-                 f"声称零重合但与 {train_name} 重合 {hit}/{len(eval_keys)}（{rate:.1%}）",
+            (add("OK", f"cot-disjoint:{eval_name}", detail)
+             if hit == 0 and expr_hit == 0 else
+             add("BLOCKER", f"cot-disjoint:{eval_name}", detail,
                  "评测集被训练集污染：重跑 scripts/build_cot_sft.py 重建"))
         else:
             add("WARN" if rate > 0.3 else "OK", f"cot-overlap:{eval_name}",

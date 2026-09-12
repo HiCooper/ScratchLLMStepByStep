@@ -149,11 +149,13 @@ setsid nohup env PYTHONUNBUFFERED=1 python3 -m minigpt.train.sft_trainer \
   --paths_output_dir models/checkpoints/sft_v2_chat > models/checkpoints/sft_v2_chat.log 2>&1 &
 
 # 5.2 CoT（先在 easy 档验证机制，再上 hard）
-python scripts/build_cot_sft.py --profile easy --n-train 60000 --n-eval 200 \
-  --out-train dataset/sft/sft_cot_easy_disjoint60k.jsonl --out-eval dataset/sft/cot_eval_easy_disjoint.jsonl
+# easy 必须带 --easy-max 50：默认 9 的题目空间只有 1064 个唯一题，60000 条训练集里同一题重复 56×，
+# 且无法切出真正不相交的留出集（实测旧留出集 156/156 全部出现在训练集里）。
+python scripts/build_cot_sft.py --profile easy --easy-max 50 --n-train 60000 --n-eval 200 \
+  --out-train dataset/sft/sft_cot_easy_em50_60k.jsonl --out-eval dataset/sft/cot_eval_easy_em50_disjoint.jsonl
 setsid nohup env PYTHONUNBUFFERED=1 python3 -m minigpt.train.sft_trainer \
   --pretrain models/checkpoints/sft_v2_chat/final.pt --data_tokenizer_dir models/tokenizer_v3 \
-  --sft-jsonl dataset/sft/sft_cot_easy_disjoint60k.jsonl --data_max_lines 60000 --data_max_len 512 \
+  --sft-jsonl dataset/sft/sft_cot_easy_em50_60k.jsonl --data_max_lines 60000 --data_max_len 512 \
   --train_batch_size 8 --train_learning_rate 1.5e-5 --train_epochs 2 \
   --paths_output_dir models/checkpoints/sft_v2_cot_easy > models/checkpoints/sft_v2_cot_easy.log 2>&1 &
 ```
@@ -168,7 +170,7 @@ python scripts/generate.py --checkpoint <ckpt> --tokenizer-dir models/tokenizer_
 # --split val = 训练时同一口径的验证集（均匀分块 + 双端对齐文档边界），可直接比较泛化
 python scripts/evaluate_pretrain.py --checkpoint <ckpt> --tokenizer-dir models/tokenizer_v3 \
   --bin <bin> --split val --output models/checkpoints/ppl.json
-python scripts/eval_thinking.py --checkpoint <ckpt> --eval-jsonl dataset/sft/cot_eval_easy_disjoint.jsonl \
+python scripts/eval_thinking.py --checkpoint <ckpt> --eval-jsonl dataset/sft/cot_eval_easy_em50_disjoint.jsonl \
   --n 60 --strategies plain,single,two-phase --repetition-penalty 1.0 --output models/checkpoints/eval_thinking.json
 ```
 
@@ -176,6 +178,14 @@ python scripts/eval_thinking.py --checkpoint <ckpt> --eval-jsonl dataset/sft/cot
 ```bash
 python3 scripts/report_training.py --json /tmp/report.json
 ```
+
+**交付自检**（收尾必跑：一条命令核对每个阶段的产物是否齐全、数字是否合理）：
+```bash
+python3 scripts/verify_v5_delivery.py                 # 缺件 exit 1；训练途中加 --allow-partial 看进度
+```
+它检查的不只是"文件在不在"：架构是否等于预设、步数是否到位、`perplexity == exp(eval_loss)`、
+ppl 是否用 `--split val` 评在同一个 bin 上、报告是否含 eval_loss 曲线与历史基线章节、
+`.bin` 的 token/vocab 与 `metrics.json` 里记录的是否对得上。
 
 汇报模板：
 ```

@@ -193,11 +193,22 @@ bash skills/minigpt-train/scripts/pipeline.sh --full --hours 10
 
 ### ⚠️ CoT 评测集口径修正（重要）
 
-`build_cot_sft.py` 旧实现靠"换 seed"避免训练/评测重合，但 **easy profile 的操作数只有 1..9、全部唯一题目仅 1063 个**，
-而训练集有数万行——实测旧 `cot_eval_easy_disjoint.jsonl` 的 156 条题目 **100%** 出现在 60k 训练集里（hard 33.5%）。
-现已改为"先去重建池、再切出留出集"并落盘自检零重合，同时提供两份可用于验收的**零重合**留出集：
-`dataset/sft/cot_eval_{easy,hard}_disjoint.jsonl`（`run_downstream_evals.sh` 已优先使用）。
-easy 侧配套训练集需用 `build_cot_sft.py --profile easy --easy-max 20` 重新生成后再 SFT。
+`build_cot_sft.py` 旧实现靠"换 seed"避免训练/评测重合，但 easy profile 默认 `--easy-max 9`
+的题目空间太小，切不出真正不相交的留出集。**实测**（`scripts/audit_dataset.py`）：
+
+| 比较 | 题面级重合 |
+|---|---|
+| 旧留出集 `cot_eval_easy_disjoint.jsonl` vs 旧训练集 `sft_cot_easy_disjoint60k.jsonl` | 0/200 |
+| 旧留出集 vs 现用训练集 `sft_cot_easy_em50_60k.jsonl` | **77/200（38.5%）** |
+
+两行不一样正说明"零重合"不能只看文件名：旧留出集自身也被重生成过，它跟谁比结论就不同。
+所以体检现在只审**链路实际使用**的那一对，并且同时用两个口径（题面级 + 抽掉模板后的算式级）。
+
+现行做法（`run_v5_downstream.sh` / `run_downstream_evals.sh` 都用这一对）：
+`build_cot_sft.py --profile easy --easy-max 50` 重建训练池（42,506 道唯一算式题），
+`--exclude-jsonl` 排除训练集题面后切出留出集，最终
+`sft_cot_easy_em50_60k.jsonl` + `cot_eval_easy_em50_disjoint.jsonl`：
+**题面级 0/200、算式级 0/194**（hard：0/200、0/135）。
 
 ### 下一步实验：容量 vs 步数（isotoken 消融）
 

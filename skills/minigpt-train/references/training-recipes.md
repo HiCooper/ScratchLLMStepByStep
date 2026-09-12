@@ -108,7 +108,7 @@ Chinchilla 参考 = 10~20 × 参数量
 # 语言建模：--split val 与训练同一口径（均匀分块 + 双端对齐文档边界）
 python scripts/evaluate_pretrain.py --checkpoint <ckpt> --bin dataset/bins/pretrain_v5_full.bin --split val
 # 思考模式：算术评测必须 --repetition-penalty 1.0（否则惩罚重复的数字）
-python scripts/eval_thinking.py --checkpoint <ckpt> --eval-jsonl dataset/sft/cot_eval_easy_disjoint.jsonl \
+python scripts/eval_thinking.py --checkpoint <ckpt> --eval-jsonl dataset/sft/cot_eval_easy_em50_disjoint.jsonl \
   --n 60 --strategies plain,single,two-phase --repetition-penalty 1.0
 ```
 

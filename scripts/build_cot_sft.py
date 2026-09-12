@@ -243,7 +243,7 @@ def main():
     ap.add_argument("--exclude-jsonl", action="append", default=[],
                     help="构建评测集时排除这些文件里出现过的题面（可多次传入）。"
                          "用于生成与**既有训练集**不相交的评测集，例如排除 "
-                         "dataset/sft/sft_cot_easy_disjoint60k.jsonl")
+                         "dataset/sft/sft_cot_easy_em50_60k.jsonl")
     ap.add_argument("--easy-max", type=int, default=9,
                     help="easy profile 的操作数上界（默认 9）。设大（如 20）可放大题目空间，"
                          "从而切出与训练集真正不相交的评测集；改变它会使新旧 easy 结果不可比")
