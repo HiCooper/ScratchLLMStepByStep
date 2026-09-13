@@ -139,7 +139,7 @@ def check_assets():
             warn("tokenizer", f"加载失败: {exc}")
     else:
         warn("tokenizer", "缺少 models/tokenizer_v3",
-             "用 notebook 01 训练，或 python scripts/train_tokenizer.py --data dataset/pretrain_t2t.jsonl --output models/tokenizer_v3 --vocab-size 32000")
+             "用 notebook 01 训练，或 python scripts/data/train_tokenizer.py --data dataset/pretrain_t2t.jsonl --output models/tokenizer_v3 --vocab-size 32000")
     # 项目只使用 tokenizer_v3；.bin 的 meta.vocab_size 必须与之相符（训练侧会强校验）
     for meta_name in ("pretrain_v4_full", "code_domain_dedup", "domain_code70_general30",
                       "domain_code50_general50", "finance_corpus", "math_clean"):
@@ -159,7 +159,7 @@ def check_assets():
     if os.path.exists(corpus):
         ok("corpus", f"dataset/pretrain_t2t.jsonl {os.path.getsize(corpus)/2**30:.2f}GB")
     else:
-        warn("corpus", "缺少预训练语料", "bash scripts/download_data.sh")
+        warn("corpus", "缺少预训练语料", "bash scripts/data/download_data.sh")
 
     bins = sorted(glob.glob(os.path.join(ROOT, "dataset", "bins", "*.bin")))
     if bins:
@@ -170,7 +170,7 @@ def check_assets():
                       f"tokens={meta.get('tokens', '?')} dtype={meta.get('dtype', 'uint16(默认)')}")
     else:
         warn("bin", "dataset/bins 下没有 .bin（预训练需要）",
-             "python scripts/build_pretrain_bin.py build --corpus-jsonl dataset/pretrain_t2t.jsonl "
+             "python scripts/data/build_pretrain_bin.py build --corpus-jsonl dataset/pretrain_t2t.jsonl "
              "--tokenizer-dir models/tokenizer_v3 --out-bin dataset/bins/pretrain_v4_full.bin --max-lines 0")
 
     sfts = sorted(glob.glob(os.path.join(ROOT, "dataset", "sft", "*.jsonl")))

@@ -135,7 +135,7 @@ fi
 if [ "$MODE" = "--smoke" ]; then
   SMOKE_BIN="dataset/bins/smoke_${PRESET}.bin"
   SMOKE_TRAIN="--model_emb_dim 128 --model_n_layers 2 --model_n_heads 4 --model_context_length 128 --train_batch_size 8 --train_learning_rate 1e-3 --train_warmup_steps 5 --train_eval_steps 10 --train_save_steps 20 --train_max_steps 30 --train_torch_compile False --train_mixed_precision_dtype none"
-  CMD_BUILD="python3 scripts/build_pretrain_bin.py build --corpus-jsonl /tmp/smoke_corpus.jsonl --tokenizer-dir models/tokenizer_v3 --out-bin $SMOKE_BIN"
+  CMD_BUILD="python3 scripts/data/build_pretrain_bin.py build --corpus-jsonl /tmp/smoke_corpus.jsonl --tokenizer-dir models/tokenizer_v3 --out-bin $SMOKE_BIN"
   CMD_TRAIN="python3 -u -m minigpt.train.pretrainer --data_tokenizer_dir models/tokenizer_v3 --data_tokenized_bin $SMOKE_BIN --data_eval_ratio 0.02 $SMOKE_TRAIN --paths_output_dir models/checkpoints/smoke_skill"
   if [ "$DRY_RUN" = "1" ]; then
     log "[dry-run] head -n 2000 dataset/pretrain_t2t.jsonl > /tmp/smoke_corpus.jsonl"
@@ -196,7 +196,7 @@ fi
 if [ "$DRY_RUN" = "1" ]; then
   cat <<EOF
 [dry-run] 预设=$PRESET nproc=$NPROC 目标步数=$STEPS
-  1) 数据：python3 scripts/build_pretrain_bin.py build --corpus-jsonl dataset/pretrain_t2t.jsonl --tokenizer-dir models/tokenizer_v3 --out-bin $FULL_BIN --max-lines $CORPUS_LINES
+  1) 数据：python3 scripts/data/build_pretrain_bin.py build --corpus-jsonl dataset/pretrain_t2t.jsonl --tokenizer-dir models/tokenizer_v3 --out-bin $FULL_BIN --max-lines $CORPUS_LINES
   2) 训练：OUT_DIR=$OUT_DIR LOG=$LOG_FILE DATA_BIN=$FULL_BIN NPROC=$NPROC TARGET_STEPS=$STEPS PRESET_ARGS="$PRESET_ARGS" setsid nohup bash scripts/train_pretrain_resilient.sh > $OUT_DIR.watchdog.log 2>&1 &
   3) 守护：setsid nohup bash scripts/checkpoint_janitor.sh 60 2 120 > /tmp/janitor.log 2>&1 &
   4) 下游：OUT_DIR=$OUT_DIR setsid nohup bash scripts/wait_and_run_downstream.sh > $OUT_DIR.downstream.log 2>&1 &
@@ -207,7 +207,7 @@ fi
 
 if [ ! -f "$FULL_BIN" ]; then
   log "==== 构建语料 .bin（max-lines=$CORPUS_LINES）===="
-  python3 scripts/build_pretrain_bin.py build --corpus-jsonl dataset/pretrain_t2t.jsonl \
+  python3 scripts/data/build_pretrain_bin.py build --corpus-jsonl dataset/pretrain_t2t.jsonl \
     --tokenizer-dir models/tokenizer_v3 --out-bin "$FULL_BIN" --max-lines "$CORPUS_LINES" || exit 1
 else
   log "语料已存在：$FULL_BIN"

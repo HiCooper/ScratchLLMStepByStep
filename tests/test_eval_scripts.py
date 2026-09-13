@@ -23,7 +23,7 @@ def tiny_corpus_bin(tmp_path_factory, tiny_tokenizer):
     """造一个足够大的合成 .bin（分块切分要求窗口数 >= 4*n_blocks）。"""
     import importlib.util
     spec = importlib.util.spec_from_file_location(
-        "build_pretrain_bin", os.path.join(SCRIPTS, "build_pretrain_bin.py"))
+        "build_pretrain_bin", os.path.join(SCRIPTS, "data", "build_pretrain_bin.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)          # 只为拿到 build 函数；脚本自身有 main 保护
 
@@ -104,8 +104,9 @@ def test_evaluate_pretrain_split_all_warns(tiny_corpus_bin, tiny_ckpt, tiny_toke
 
 def test_eval_scripts_have_help_and_no_syntax_error():
     """评测/推理脚本至少能 --help（防止 import 期崩溃）。"""
+    # 脚本已按角色分目录，这里显式写相对路径（防再次挪动时静默失效）
     for name in ("evaluate_pretrain.py", "eval_thinking.py", "generate.py",
-                 "validate_pretrain.py", "report_training.py"):
+                 "tools/validate_pretrain.py", "report_training.py"):
         r = subprocess.run([sys.executable, os.path.join(SCRIPTS, name), "--help"],
                            capture_output=True, text=True, cwd=ROOT)
         assert r.returncode == 0, f"{name} --help 失败: {r.stderr[:400]}"
@@ -196,7 +197,7 @@ def test_cot_format_constants_are_single_sourced():
     # 造数据脚本用的是同一份常量（模块级别名 THINK / MARK）
     import importlib.util
     spec = importlib.util.spec_from_file_location(
-        "build_cot_sft_probe", os.path.join(SCRIPTS, "build_cot_sft.py"))
+        "build_cot_sft_probe", os.path.join(SCRIPTS, "data", "build_cot_sft.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     assert (mod.THINK, mod.MARK) == (cot_format.THINK_PREFIX, cot_format.ANSWER_MARK)

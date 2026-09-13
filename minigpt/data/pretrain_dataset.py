@@ -202,7 +202,7 @@ def _iter_corpus_lines(input_path, byte_range=None):
     """按行产出语料内容。
 
     `byte_range=(start, end)` 时只产出**起始偏移落在该区间**的行（供多进程并行切分），
-    边界必须对齐到行首——见 `scripts/build_pretrain_bin.py:_line_aligned_bounds`。
+    边界必须对齐到行首——见 `scripts/data/build_pretrain_bin.py:_line_aligned_bounds`。
     用二进制读 + decode：文本模式的 `seek()` 只接受 `tell()` 返回的 opaque cookie，
     不能按字节偏移定位。
     """
@@ -234,7 +234,7 @@ def tokenize_jsonl_to_bin(input_path, output_path, tokenizer, content_key="text"
     真实事故：上游语料 `pretrain_t2t.jsonl` 第 8,441,338 行的开引号被 0x02 控制符替换
     （`{"text": \\x02A ball is thrown...`）。旧实现直接 `_json.loads` 抛异常，在跑满 65 分钟、
     写完 3.15GB 之后崩溃，**连 meta 都没落盘**，整轮白跑。现在跳过该行并记数，
-    由 `scripts/audit_dataset.py`（非 --quick）在开训前就能报出 `JSON 非法 N`。
+    由 `scripts/data/audit_dataset.py`（非 --quick）在开训前就能报出 `JSON 非法 N`。
     """
     vocab_size = len(tokenizer)
     dtype = dtype or ("uint32" if vocab_size > 65535 else "uint16")
@@ -285,7 +285,7 @@ def tokenize_jsonl_to_bin(input_path, output_path, tokenizer, content_key="text"
     print(f"[data] lines={n_lines} tokens={n_tokens} dtype={dtype} -> {output_path}")
     if n_bad:
         print(f"[data] ⚠️  跳过 {n_bad} 行 JSON 非法（示例：{bad_examples}）——"
-              f"上游语料有脏行，建议先用 scripts/audit_dataset.py 定位")
+              f"上游语料有脏行，建议先用 scripts/data/audit_dataset.py 定位")
     print(f"[data] meta -> {out_meta}")
     return n_lines, n_tokens, dtype
 

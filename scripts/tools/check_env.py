@@ -4,7 +4,7 @@
 以及主要依赖包版本。
 
 用法：
-    python scripts/check_env.py
+    python scripts/tools/check_env.py
 """
 import platform
 import sys

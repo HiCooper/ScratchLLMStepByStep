@@ -12,9 +12,9 @@
   - zero_supervision 一条监督 token 都没有（**期望为 0**，非 0 说明截断策略退化）
 
 用法：
-  python3 scripts/audit_sft_lengths.py                      # 默认 sft_data_zh 前 4 万条 / ctx512
-  python3 scripts/audit_sft_lengths.py --jsonl dataset/sft/sft_cot_hard_80k.jsonl --max-lines 80000
-  python3 scripts/audit_sft_lengths.py --json /tmp/sft_stats.json
+  python3 scripts/data/audit_sft_lengths.py                      # 默认 sft_data_zh 前 4 万条 / ctx512
+  python3 scripts/data/audit_sft_lengths.py --jsonl dataset/sft/sft_cot_hard_80k.jsonl --max-lines 80000
+  python3 scripts/data/audit_sft_lengths.py --json /tmp/sft_stats.json
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 from minigpt.data.sft_dataset import InstructionDataset, assistant_spans  # noqa: E402
 

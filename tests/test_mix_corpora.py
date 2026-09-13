@@ -22,7 +22,7 @@ def _write(path, tag, n, body_len):
 
 
 def _run(args):
-    return subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "mix_corpora.py")] + args,
+    return subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "data", "mix_corpora.py")] + args,
                           capture_output=True, text=True, cwd=ROOT)
 
 

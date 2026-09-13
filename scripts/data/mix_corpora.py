@@ -12,13 +12,13 @@
 
 用法：
     # 领域:通用 = 70:30，总量 3000 万字符
-    python scripts/mix_corpora.py \
+    python scripts/data/mix_corpora.py \
         --source dataset/domain/code_corpus.dedup.jsonl:0.70 \
         --source dataset/pretrain_t2t.jsonl:0.30 \
         --target-chars 30000000 --out dataset/mixed/code70_general30.jsonl
 
     # 不给权重时按文件大小等比例混合
-    python scripts/mix_corpora.py --source a.jsonl --source b.jsonl \
+    python scripts/data/mix_corpora.py --source a.jsonl --source b.jsonl \
         --target-chars 1e8 --out mix.jsonl
 
 设计要点：
@@ -205,7 +205,7 @@ def main() -> int:
     print("[mix] 实际占比: " + ", ".join(
         f"{Path(e['path']).name} {e['actual_share']:.1%}" for e in manifest["sources"]))
     print(f"[mix] manifest → {mpath}")
-    print(f"[mix] 下一步: python scripts/build_pretrain_bin.py build --corpus-jsonl {args.out} "
+    print(f"[mix] 下一步: python scripts/data/build_pretrain_bin.py build --corpus-jsonl {args.out} "
           f"--tokenizer-dir models/tokenizer_v3 --out-bin <out.bin>")
     return 0
 

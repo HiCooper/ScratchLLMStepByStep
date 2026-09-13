@@ -9,7 +9,8 @@ from pathlib import Path
 
 # 确保测试能 import minigpt 包，以及 scripts/ 下的工具脚本（如 train_tokenizer.py）
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-for p in (PROJECT_ROOT, PROJECT_ROOT / "scripts"):
+for p in (PROJECT_ROOT, PROJECT_ROOT / "scripts", PROJECT_ROOT / "scripts" / "data",
+          PROJECT_ROOT / "scripts" / "tools", PROJECT_ROOT / "scripts" / "experiments"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
@@ -37,7 +38,7 @@ def small_config():
 @pytest.fixture(scope="session")
 def tiny_tokenizer(tmp_path_factory):
     """用合成中英文文本训练一个迷你 BPE 分词器，供数据/训练类测试复用（只训练一次）。"""
-    from train_tokenizer import train_tokenizer  # scripts/train_tokenizer.py
+    from train_tokenizer import train_tokenizer  # scripts/data/train_tokenizer.py
 
     data_dir = tmp_path_factory.mktemp("tiny_tokenizer")
     data_path = data_dir / "corpus.jsonl"

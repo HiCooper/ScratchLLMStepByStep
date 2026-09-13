@@ -10,7 +10,7 @@
 # 日志与 SUMMARY 另放 downstream_v5/，避免与 run 目录混在一起。
 #
 # 设计依据（references/data-distribution.md）：
-#   - SFT 抽 4 万条 × 2 epoch = 8 万样本 / **实测 14.5M 监督 token**（scripts/audit_sft_lengths.py；
+#   - SFT 抽 4 万条 × 2 epoch = 8 万样本 / **实测 14.5M 监督 token**（scripts/data/audit_sft_lengths.py；
 #     旧注释写的"10 万条 / 21.2M"两处都估错了），对 47.9M 模型约 0.3 token/参数，量级合适
 #   - CoT easy 用 --easy-max 50：生成器题池唯一题面 45200（easy-max 9 只有 1063）→ 平均重复 56×→1.33×
 #     （这组数字说的是**生成器题池**，不是磁盘文件的唯一题面数；验收看 audit_dataset.py 的重合检查）
@@ -79,7 +79,7 @@ if [ -s dataset/sft/sft_cot_easy_em50_60k.jsonl ] && [ -s dataset/sft/cot_eval_e
   log "⏭ CoT easy 数据已存在，跳过生成"; echo "- ⏭ CoT easy 数据（已存在，跳过）" >> "$SUMMARY"
 else
   stage "CoT easy 数据生成(easy-max 50)" "$OUT/cot_data.log" \
-    python3 scripts/build_cot_sft.py --profile easy --easy-max 50 \
+    python3 scripts/data/build_cot_sft.py --profile easy --easy-max 50 \
       --n-train 60000 --n-eval 200 \
       --out-train dataset/sft/sft_cot_easy_em50_60k.jsonl \
       --out-eval  dataset/sft/cot_eval_easy_em50_disjoint.jsonl

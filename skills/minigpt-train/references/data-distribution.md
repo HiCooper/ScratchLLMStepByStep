@@ -1,8 +1,8 @@
 # 数据分布：事实基线、配方与验收
 
 > 这份文档回答一个具体问题：**"训练语料够不够、分布对不对"**，以及**怎么在开训前就查出来**。
-> 配套工具：`scripts/audit_dataset.py`（体检）、`scripts/mix_corpora.py`（配比）、
-> `scripts/parquet_to_jsonl.py`（领域语料入库）。配方命令见 `SKILL.md §7.6`。
+> 配套工具：`scripts/data/audit_dataset.py`（体检）、`scripts/data/mix_corpora.py`（配比）、
+> `scripts/data/parquet_to_jsonl.py`（领域语料入库）。配方命令见 `SKILL.md §7.6`。
 
 ## 1. 为什么单列一份文档
 
@@ -62,7 +62,7 @@
 ## 6. 验收清单（不达标不开训）
 
 ```bash
-python scripts/audit_dataset.py       # 有 BLOCKER 直接返回 1
+python scripts/data/audit_dataset.py       # 有 BLOCKER 直接返回 1
 ```
 
 > **必须跑完整模式，不要用 `--quick`**：`--quick` 会跳过语料扫描。
@@ -74,7 +74,7 @@ python scripts/audit_dataset.py       # 有 BLOCKER 直接返回 1
 - [ ] 每个来源 manifest 的 `actual_share` ≈ 目标权重（±1%）；
 - [ ] 产物打印的"语种占比 / 长度分档"符合预期（例如中文领域语料不应出现英文为主）；
 - [ ] `.bin` 的 `meta.tokens` 与文件字节数精确对账（`audit_dataset.py` 会校验）；
-- [ ] 训练后**双口径**：`bash scripts/run_domain_compare.sh` —— 领域 ppl 明显下降 **且** 通用 ppl 上升 ≤5%。
+- [ ] 训练后**双口径**：`bash scripts/experiments/run_domain_compare.sh` —— 领域 ppl 明显下降 **且** 通用 ppl 上升 ≤5%。
 
 ## 7. 语料选型（实测踩到的事实）
 
@@ -117,7 +117,7 @@ python3 -m minigpt.train.pretrainer \
   --train_learning_rate 2e-5 --train_eval_steps 1000 --train_save_steps 4000
 
 # ④ 双口径验收（缺一不可）
-bash scripts/run_domain_compare.sh
+bash scripts/experiments/run_domain_compare.sh
 ```
 
 中文领域同理，把 `--data_tokenized_bin` 换成 `dataset/bins/finance_corpus.bin`

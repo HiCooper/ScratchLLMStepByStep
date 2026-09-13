@@ -101,7 +101,7 @@ Chinchilla 参考 = 10~20 × 参数量
 
 ## 7. 词表/数据管线要点
 
-- 数据：`python scripts/build_pretrain_bin.py build --corpus-jsonl ... --tokenizer-dir ... --out-bin ... --max-lines N`
+- 数据：`python scripts/data/build_pretrain_bin.py build --corpus-jsonl ... --tokenizer-dir ... --out-bin ... --max-lines N`
   自动按词表选择 uint16/uint32 并写 `.meta.json`（`TokenBinDataset` 依赖它）。
 - 换 tokenizer：只改 `--data_tokenizer_dir`，模型词表自动跟随；**词表 >65535 必须 uint32**。
 - 语料顺序即切片顺序；混合多来源请先 shuffle 行顺序。
@@ -136,9 +136,9 @@ python scripts/eval_thinking.py --checkpoint <ckpt> --eval-jsonl dataset/sft/cot
 ## 容量消融（isotoken）
 
 ```bash
-DRY_RUN=1 bash scripts/run_capacity_ablation.sh     # 无 GPU 也能检查命令拼装
+DRY_RUN=1 bash scripts/experiments/run_capacity_ablation.sh     # 无 GPU 也能检查命令拼装
 setsid nohup env TAG=cap768 TOKENS=8.6e8 BS=16 ACCUM=1 \
-  bash scripts/run_capacity_ablation.sh > models/checkpoints/cap768.log 2>&1 &
+  bash scripts/experiments/run_capacity_ablation.sh > models/checkpoints/cap768.log 2>&1 &
 ```
 
 - 512/10/8 (47.9M) 基线：`pretrain_v2_full`，8.6 亿 tokens / 211k 步

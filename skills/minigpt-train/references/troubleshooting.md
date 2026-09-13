@@ -15,15 +15,15 @@
 | 生成结果尾部有 `<|im_end|>` | 它是 tokenizer_v3 的 eos（回合结束符），属预期 | 默认 CLI 已去特殊 token；调试用 `--keep-special-tokens` |
 | 磁盘写满（WSL 下 C 盘爆） | checkpoint 每 4000 步写 ~585MB；WSL vhdx 只增不减 | 跑 `scripts/checkpoint_janitor.sh`；清理 Windows Temp；数据放 D/E 盘；必要时 `wsl --manage <distro> --set-sparse true` 或迁移 vhdx |
 | 看板无数据/进度不动 | 日志路径不对、任务未启动、端口占用 | `python3 scripts/train_dashboard.py --once`；确认 `--log/--out-dir` 指向当前 run；`ss -ltn | grep 8099` |
-| `pytest` 失败 | 依赖缺失或 API 变更 | `pip install -r requirements.txt`；`pytest tests/ -q -x` 看首个失败；再跑 `scripts/check_env.py` |
-| 数据行数/长度与预期不符 | jsonl 每行是多条拼接的长段落 | 训练前用 `scripts/build_pretrain_bin.py info --bin <bin>` 核对 tokens 与 dtype |
+| `pytest` 失败 | 依赖缺失或 API 变更 | `pip install -r requirements.txt`；`pytest tests/ -q -x` 看首个失败；再跑 `scripts/tools/check_env.py` |
+| 数据行数/长度与预期不符 | jsonl 每行是多条拼接的长段落 | 训练前用 `scripts/data/build_pretrain_bin.py info --bin <bin>` 核对 tokens 与 dtype |
 
 ## 快速自检命令
 
 ```bash
 bash skills/minigpt-train/scripts/preflight.sh            # 环境+资产+服务
 python3 -m pytest tests/ -q                               # 单测
-python3 scripts/build_pretrain_bin.py info --bin dataset/bins/pretrain_v4_full.bin
+python3 scripts/data/build_pretrain_bin.py info --bin dataset/bins/pretrain_v4_full.bin
 python3 scripts/train_dashboard.py --once                 # 训练进度
 tail -n 30 models/checkpoints/pretrain_v2_full.log
 ```

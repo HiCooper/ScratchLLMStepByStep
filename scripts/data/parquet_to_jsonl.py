@@ -2,18 +2,18 @@
 """把 IndustryCorpus2（parquet，text 字段）转成训练用 jsonl，并可混入通用语料。
 
 用途：
-  - 领域增量预训练（推荐）：产出 {"text": ...} jsonl → scripts/build_pretrain_bin.py → 续训
+  - 领域增量预训练（推荐）：产出 {"text": ...} jsonl → scripts/data/build_pretrain_bin.py → 续训
   - 之后可再基于它构造指令数据做 SFT
 
 示例：
   # 1) 转换（只取 text，过滤短/超长与低质量，混入 15% 通用语料防遗忘）
-  python scripts/parquet_to_jsonl.py \
+  python scripts/data/parquet_to_jsonl.py \
       --src dataset/IndustryCorpus2_computer_programming_code_high \
       --out dataset/domain/code_corpus.dedup.jsonl \
       --min-chars 300 --max-chars 8000 --max-line-length 500 --min-quality 3.0 \
       --mix-jsonl dataset/pretrain_t2t.jsonl --mix-ratio 0.15 --mix-limit 200000
   # 2) 建 bin（自动选 uint16/uint32 + meta）
-  python scripts/build_pretrain_bin.py build --corpus-jsonl dataset/domain/code_corpus.dedup.jsonl \
+  python scripts/data/build_pretrain_bin.py build --corpus-jsonl dataset/domain/code_corpus.dedup.jsonl \
       --tokenizer-dir models/tokenizer_v3 --out-bin dataset/bins/code_domain_dedup.bin --max-lines 0
   # 3) 续训（低 lr、防遗忘；示例从 pretrain_v2_full 续跑 1 epoch）
   #   见 skills/minigpt-train/SKILL.md「领域增量预训练」或 AGENTS.md
@@ -86,7 +86,7 @@ def iter_parquet_texts(src: str, content_key: str, filters: dict, shuffle_seed: 
             print(f"           {os.path.relpath(p, src)}")
         if len(hidden) > 5:
             print(f"           ... 其余 {len(hidden) - 5} 个")
-        print(f"[parquet]    若要包含它们，先续传并确认可解析（scripts/audit_dataset.py 会验活）")
+        print(f"[parquet]    若要包含它们，先续传并确认可解析（scripts/data/audit_dataset.py 会验活）")
 
     bad = check_parquet_readable(files)
     if bad:
@@ -301,7 +301,7 @@ def main():
     print(f"[domain2jsonl] domain={len(domain)} general(mix)={len(mix)} total={len(rows)} -> {args.out}")
     print(f"[domain2jsonl] chars≈{stats['chars']/1e6:.1f}M, bytes≈{stats['chars']*1.5/1e6:.0f}MB(估)"
           + (f", tokens≈{est_tokens/1e6:.1f}M（按 {args.tokenizer} 抽样估算）" if est_tokens else ""))
-    print(f"[domain2jsonl] 下一步: python scripts/build_pretrain_bin.py build "
+    print(f"[domain2jsonl] 下一步: python scripts/data/build_pretrain_bin.py build "
           f"--corpus-jsonl {args.out} --tokenizer-dir models/tokenizer_v3 "
           f"--out-bin dataset/bins/{os.path.splitext(os.path.basename(args.out))[0]}.bin --max-lines 0")
 

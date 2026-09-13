@@ -12,7 +12,7 @@ import sys
 import pytest
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-SCRIPT = os.path.join(ROOT, "scripts", "build_pretrain_bin.py")
+SCRIPT = os.path.join(ROOT, "scripts", "data", "build_pretrain_bin.py")
 
 
 def _sha(path):
@@ -74,7 +74,7 @@ def test_parallel_rejects_max_lines(corpus, tmp_path, tiny_tokenizer):
 
 
 def test_line_aligned_bounds_cover_file_exactly(corpus):
-    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    sys.path.insert(0, os.path.join(ROOT, "scripts", "data"))
     from build_pretrain_bin import line_aligned_bounds
 
     size = os.path.getsize(corpus)

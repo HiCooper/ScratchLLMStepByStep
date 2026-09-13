@@ -93,15 +93,15 @@ NPROC=4 bash scripts/pretrain_start.sh --paths_output_dir models/checkpoints/pre
 | `minigpt/data/pretrain_dataset.py` | `tokenize_jsonl_to_bin`（uint16/uint32 自适应 + `.meta.json`）、`TokenBinDataset` |
 | `minigpt/data/sft_dataset.py` | `InstructionDataset / collate / split_dataset` |
 | `minigpt/train/{trainer,pretrainer,sft_trainer,metrics}.py` | 训练器（AMP/梯度累积/lr 调度/eval/save/resume/DDP/compile/num_workers）、入口、TensorBoard 指标 |
-| `scripts/build_pretrain_bin.py` | 语料 → `.bin`（`build` / `info`） |
-| `scripts/audit_dataset.py` | 数据集体检（bin↔meta↔分词器对账、切分预览、SFT 泄漏/CoT 重合、token 预算；有 BLOCKER 返回 1） |
-| `scripts/audit_sft_lengths.py` | SFT 真实规模（监督 token、截断路径分布、零监督样本；CPU 约 30s） |
-| `scripts/mix_corpora.py` / `parquet_to_jsonl.py` / `clean_long_docs.py` | 语料侧：按**字符**配比混合 / parquet→jsonl（`--mix-by chars`、`--shards`）/ 长文档结构化切块 |
+| `scripts/data/build_pretrain_bin.py` | 语料 → `.bin`（`build` / `info`） |
+| `scripts/data/audit_dataset.py` | 数据集体检（bin↔meta↔分词器对账、切分预览、SFT 泄漏/CoT 重合、token 预算；有 BLOCKER 返回 1） |
+| `scripts/data/audit_sft_lengths.py` | SFT 真实规模（监督 token、截断路径分布、零监督样本；CPU 约 30s） |
+| `scripts/data/mix_corpora.py` / `parquet_to_jsonl.py` / `clean_long_docs.py` | 语料侧：按**字符**配比混合 / parquet→jsonl（`--mix-by chars`、`--shards`）/ 长文档结构化切块 |
 | `scripts/generate.py` | 推理 CLI（`--chat --thinking --thinking-strategy single`） |
 | `scripts/evaluate_pretrain.py` | loss / perplexity（**默认 `--split val`** 走与训练同一口径的验证集） |
 | `scripts/eval_thinking.py` | 思考模式对比（plain/single/two-phase + **分档准确率** `by_difficulty`，必须 `--repetition-penalty 1.0`） |
 | `scripts/chat_probe.py` | 51 场景对话质检（greedy + sampled） |
-| `scripts/build_cot_sft.py` | CoT 数据（`--profile easy` / `hard`，自带答案） |
+| `scripts/data/build_cot_sft.py` | CoT 数据（`--profile easy` / `hard`，自带答案） |
 | `scripts/train_dashboard.py` | 看板（网页 8099 / `--once` / `--plot`；默认**自动跟随当前正在跑的 run**，含 SFT 阶段） |
 | `scripts/watch_training.sh` | 终端版看板（SSH 用；不传参自动选最新 run） |
 | `scripts/report_training.py` | 汇总全部 run/评测 → Markdown 报告（曲线+噪声、ppl 对比、思考模式准确率与分档、样例、历史基线；`--json` 供 agent 解析） |
@@ -121,7 +121,7 @@ NPROC=4 bash scripts/pretrain_start.sh --paths_output_dir models/checkpoints/pre
 
 ```bash
 # 造 bin（幂等；自动选 uint16/uint32 并写 meta）。已有成品则跳过 → dataset/README.md
-python scripts/build_pretrain_bin.py build --corpus-jsonl dataset/pretrain_t2t.jsonl \
+python scripts/data/build_pretrain_bin.py build --corpus-jsonl dataset/pretrain_t2t.jsonl \
   --tokenizer-dir models/tokenizer_v3 --out-bin dataset/bins/pretrain_v5_full.bin --nproc 6
 
 # 预训练基座（--model_*/--train_* 用 §1 预设；下面是 gpu-small 档）
@@ -160,7 +160,7 @@ setsid nohup env PYTHONUNBUFFERED=1 python3 -m minigpt.train.sft_trainer \
 # 5.2 CoT（先在 easy 档验证机制，再上 hard）
 # easy 必须带 --easy-max 50：默认 9 的题池只有 1064 个唯一题面，60000 条训练集里同一题平均重复 56×，
 # 且切不出真正不相交的留出集（实测旧留出集与现用训练集题面级重合 77/200 = 38.5%）。
-python scripts/build_cot_sft.py --profile easy --easy-max 50 --n-train 60000 --n-eval 200 \
+python scripts/data/build_cot_sft.py --profile easy --easy-max 50 --n-train 60000 --n-eval 200 \
   --out-train dataset/sft/sft_cot_easy_em50_60k.jsonl --out-eval dataset/sft/cot_eval_easy_em50_disjoint.jsonl
 setsid nohup env PYTHONUNBUFFERED=1 python3 -m minigpt.train.sft_trainer \
   --pretrain models/checkpoints/sft_v2_chat/final.pt --data_tokenizer_dir models/tokenizer_v3 \
@@ -227,10 +227,10 @@ SFT/CoT：loss 与产物；思考模式 easy/hard 准确率（对照基座）
 ```bash
 # 数据源、规模、生成/重配命令  → dataset/README.md（唯一详述处）
 # 训练命令：基座 / 领域续训(70:30) / 退火档(50:50) / 双口径验收 → references/data-distribution.md §8
-python scripts/audit_dataset.py     # 开训前完整体检（别加 --quick）；有 BLOCKER 返回 1
+python scripts/data/audit_dataset.py     # 开训前完整体检（别加 --quick）；有 BLOCKER 返回 1
 ```
 
-**验收（缺一不可）**：领域 ppl 明显下降 **且** 通用 ppl 上升 ≤5%（`bash scripts/run_domain_compare.sh`）。
+**验收（缺一不可）**：领域 ppl 明显下降 **且** 通用 ppl 上升 ≤5%（`bash scripts/experiments/run_domain_compare.sh`）。
 反例：`lr=1e-4 / 1 epoch / 名义 mix 15%` 的代码续训 → 领域 ppl −64%，但通用 ppl **+41%**，
 下游对话 SFT eval_loss 2.78→2.91。不达标就降 lr（1e-5~3e-5）、提高混料比（≥30%）或减少步数。
 

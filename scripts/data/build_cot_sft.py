@@ -6,7 +6,7 @@
     output:      "让我逐步分析：\n1. …\n2. …\n最终答案：<数字>"
 
 用法：
-    python scripts/build_cot_sft.py --out-train dataset/sft/sft_cot_zh.jsonl \
+    python scripts/data/build_cot_sft.py --out-train dataset/sft/sft_cot_zh.jsonl \
         --out-eval dataset/sft/cot_eval_hard_disjoint.jsonl --n-train 30000 --n-eval 200
 """
 import argparse

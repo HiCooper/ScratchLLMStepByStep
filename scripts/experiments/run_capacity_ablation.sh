@@ -7,7 +7,7 @@
 #
 # 用法（需要单卡 >=16GB；<16GB 请用 BS/ACCUM 组合把有效 batch 降下来）：
 #   setsid nohup env TAG=cap768 TOKENS=8.6e8 BS=16 ACCUM=1 \
-#     bash scripts/run_capacity_ablation.sh > models/checkpoints/cap768.log 2>&1 &
+#     bash scripts/experiments/run_capacity_ablation.sh > models/checkpoints/cap768.log 2>&1 &
 #
 # 产物：
 #   models/checkpoints/pretrain_cap768_final.pt 附近的标准产物（checkpoint-*/final.pt/metrics.json）
@@ -18,7 +18,7 @@
 #    与 dry-run 命令行拼装验证，**未真实执行过训练**。
 set -uo pipefail
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 TAG="${TAG:-cap768}"
 TOKENS="${TOKENS:-8.6e8}"        # 与 pretrain_v2_full 对齐的 isotoken 预算
@@ -60,7 +60,7 @@ if [ "$DRY_RUN" = "1" ]; then
   echo "    setsid nohup bash scripts/train_pretrain_resilient.sh > $OUT_DIR.log 2>&1 &"
   echo "  # 之后："
   echo "  BASE=$OUT_DIR/final.pt TAG=$TAG bash scripts/run_downstream.sh   # SFT + 零重合 CoT 评测"
-  echo "  bash scripts/run_domain_compare.sh"
+  echo "  bash scripts/experiments/run_domain_compare.sh"
   exit 0
 fi
 
@@ -74,7 +74,7 @@ cat <<EOF
 
 === 2) 训练完成后跑下游（手动执行，或交给通用接力自动触发）===
   BASE=$OUT_DIR/final.pt TAG=$TAG bash scripts/run_downstream.sh
-  TAG=$TAG bash scripts/run_domain_compare.sh
+  TAG=$TAG bash scripts/experiments/run_domain_compare.sh
   # 或者后台等 final.pt 出现自动跑（OUT_DIR 必传，否则会去等一个写死的旧目录）：
   #   OUT_DIR=$OUT_DIR setsid nohup bash scripts/wait_and_run_downstream.sh > $OUT_DIR.downstream.log 2>&1 &
 

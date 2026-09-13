@@ -5,10 +5,10 @@
 #     它是全量的真子集，留着只会让人不知道该训哪一份。
 # 数据源：https://www.modelscope.cn/datasets/gongjy/minimind_dataset
 #
-# 用法：bash scripts/download_data.sh [目标目录]   （默认下载到 ./dataset）
+# 用法：bash scripts/data/download_data.sh [目标目录]   （默认下载到 ./dataset）
 set -euo pipefail
 
-cd "$(dirname "$0")/.." || exit 1
+cd "$(dirname "$0")/../.." || exit 1
 
 DATASET="gongjy/minimind_dataset"
 TARGET_DIR="${1:-dataset}"
@@ -31,7 +31,7 @@ fi
 cat <<EOF
 
 下载完成，数据位于 $TARGET_DIR/。后续步骤：
-  1) 分词器：对 $TARGET_DIR/pretrain_t2t.jsonl 取子集训练（见 scripts/train_tokenizer.py，加 --max-lines 控制规模）
+  1) 分词器：对 $TARGET_DIR/pretrain_t2t.jsonl 取子集训练（见 scripts/data/train_tokenizer.py，加 --max-lines 控制规模）
   2) 预训练：对 $TARGET_DIR/pretrain_t2t.jsonl 执行 build_pretrain_bin.py（content_key="text"）
-     生成 .bin 后即可预训练（见 scripts/validate_pretrain.py）
+     生成 .bin 后即可预训练（见 scripts/tools/validate_pretrain.py）
 EOF

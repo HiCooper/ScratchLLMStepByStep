@@ -94,10 +94,13 @@ def _declared_flags(path: str) -> set:
 def test_no_invisible_script():
     """`scripts/` 下每个脚本都要在文档里能被找到（否则后人不知道它存在、能不能用）。"""
     body = "\n".join(_doc_text(d) for d in DOCS if os.path.exists(d))
-    scripts = sorted(f for f in os.listdir(os.path.join(ROOT, "scripts"))
-                     if f.endswith((".py", ".sh")))
+    # 递归扫描：脚本已按角色分到 scripts/{data,tools,experiments}/ 子目录，
+    # 只看顶层会让子目录里新增的脚本"隐形"（这条测试的意义就是防这个）。
+    scripts = sorted(os.path.relpath(p, os.path.join(ROOT, "scripts"))
+                     for p in glob.glob(os.path.join(ROOT, "scripts", "**", "*"), recursive=True)
+                     if os.path.isfile(p) and p.endswith((".py", ".sh")))
     assert scripts, "scripts/ 目录读不到脚本，路径解析有问题"
-    missing = [f for f in scripts if f not in body]
+    missing = [f for f in scripts if os.path.basename(f) not in body]
     assert not missing, f"这些脚本在任何文档里都没被提到：{missing}"
 
 

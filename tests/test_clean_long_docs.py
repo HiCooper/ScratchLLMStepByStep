@@ -13,7 +13,7 @@ import sys
 import pytest
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(ROOT, "scripts"))
+sys.path.insert(0, os.path.join(ROOT, "scripts", "data"))
 
 
 @pytest.fixture()
@@ -100,7 +100,7 @@ def test_cli_end_to_end_and_report(tmp_path, cleaner):
     pq.write_table(pa.table({"text": docs, "quality_score": [4.0] * len(docs)}),
                    str(src / "rank_00000.parquet"))
     out = tmp_path / "clean.jsonl"
-    r = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "clean_long_docs.py"),
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "data", "clean_long_docs.py"),
                         "--src", str(tmp_path / "src"), "--out", str(out),
                         "--chunk-chars", "600", "--min-chunk", "100"],
                        capture_output=True, text=True, cwd=ROOT)

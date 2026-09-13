@@ -4,7 +4,7 @@
 用于验证 minigpt 包的训练链路是否可用（非完整训练，默认只跑 1 个 epoch 的小样本）。
 
 用法：
-    python scripts/validate_pretrain.py \
+    python scripts/tools/validate_pretrain.py \
         --tokenizer models/tokenizer_v3 \
         --bin dataset/bins/pretrain_v4_full.bin \
         --output models/checkpoints \
@@ -15,8 +15,8 @@ import os
 import sys
 import time
 
-# 允许直接 `python scripts/validate_pretrain.py` 运行（与仓库内其他脚本一致）
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+# 允许直接 `python scripts/tools/validate_pretrain.py` 运行（与仓库内其他脚本一致）
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 import torch
 from transformers import AutoTokenizer

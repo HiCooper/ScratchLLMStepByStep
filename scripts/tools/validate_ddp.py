@@ -2,10 +2,10 @@
 
 用 torchrun 启动：
     # 单卡单进程：验证 DDP 代码路径本身（init_process_group / DDP 包装 / 采样器 / barrier）
-    torchrun --nproc_per_node 1 scripts/validate_ddp.py --tokenizer models/tokenizer_v3 --bin dataset/debug/pretrain_head.bin
+    torchrun --nproc_per_node 1 scripts/tools/validate_ddp.py --tokenizer models/tokenizer_v3 --bin dataset/debug/pretrain_head.bin
 
     # 多卡：每进程独占一张卡，验证跨进程梯度同步
-    torchrun --nproc_per_node 2 scripts/validate_ddp.py --tokenizer models/tokenizer_v3 --bin dataset/debug/pretrain_head.bin
+    torchrun --nproc_per_node 2 scripts/tools/validate_ddp.py --tokenizer models/tokenizer_v3 --bin dataset/debug/pretrain_head.bin
 
 注意：跨进程梯度同步需要 >=2 张真实 GPU（NCCL 需要多卡环境）；单卡只能验证到
 「DDP 代码路径本身能跑通」这一层（nproc=1）。
@@ -18,8 +18,8 @@ import argparse
 import os
 import sys
 
-# 允许直接 `python scripts/validate_ddp.py` / torchrun 运行（与仓库内其他脚本一致）
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+# 允许直接 `python scripts/tools/validate_ddp.py` / torchrun 运行（与仓库内其他脚本一致）
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 import torch
 from transformers import AutoTokenizer

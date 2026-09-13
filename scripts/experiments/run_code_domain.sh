@@ -9,12 +9,12 @@
 #   4) 生成 models/checkpoints/TRAINING_REPORT.md
 #
 # 用法（后台）：
-#   setsid nohup bash scripts/run_code_domain.sh > models/checkpoints/domain_pipeline.log 2>&1 < /dev/null &
+#   setsid nohup bash scripts/experiments/run_code_domain.sh > models/checkpoints/domain_pipeline.log 2>&1 < /dev/null &
 # 说明：本脚本刻意**不加 `set -e`**——它的职责是长时间守护/自愈，很多命令（pgrep 无匹配返回 1、
 # 单次训练失败需要重试、清理失败需要忽略）本来就允许非零退出；加了 -e 会让守护进程本身
 # 被一次瞬时失败带走，反而更不安全。因此只用 `set -uo pipefail` 兜住未定义变量与管道错误。
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 SRC="${SRC:-dataset/IndustryCorpus2_computer_programming_code_high}"
 JSONL="${JSONL:-dataset/domain/code_corpus.dedup.jsonl}"
@@ -36,7 +36,7 @@ log() { echo "[$(date '+%F %T')] $*"; }
 # ---------------- 0) 数据准备（CPU，可与 GPU 任务并行） ----------------
 if [ ! -f "$JSONL" ]; then
   log "=== 0.1 parquet → jsonl（过滤 + 混入 $MIX_RATIO 通用语料）==="
-  python3 scripts/parquet_to_jsonl.py --src "$SRC" --out "$JSONL" \
+  python3 scripts/data/parquet_to_jsonl.py --src "$SRC" --out "$JSONL" \
     --min-chars "$MIN_CHARS" --max-chars "$MAX_CHARS" --max-line-length "$MAX_LINE" \
     --min-quality "$MIN_QUALITY" \
     --mix-jsonl dataset/pretrain_t2t.jsonl --mix-ratio "$MIX_RATIO" --mix-limit 300000 \
@@ -47,7 +47,7 @@ fi
 
 if [ ! -f "$BIN" ]; then
   log "=== 0.2 建 .bin（tokenize，CPU）==="
-  python3 scripts/build_pretrain_bin.py build --corpus-jsonl "$JSONL" \
+  python3 scripts/data/build_pretrain_bin.py build --corpus-jsonl "$JSONL" \
     --tokenizer-dir "$TOK" --out-bin "$BIN" --max-lines 0 || exit 1
 else
   log "已存在 bin：$BIN"

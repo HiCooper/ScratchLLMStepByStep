@@ -31,7 +31,7 @@ def test_filters_and_mix(tmp_path):
                              for i in range(50)), encoding="utf-8")
     out = tmp_path / "out.jsonl"
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    r = subprocess.run([sys.executable, os.path.join(root, "scripts", "parquet_to_jsonl.py"),
+    r = subprocess.run([sys.executable, os.path.join(root, "scripts", "data", "parquet_to_jsonl.py"),
                         "--src", str(src), "--out", str(out),
                         "--min-chars", "300", "--max-line-length", "500", "--min-quality", "3.0",
                         "--mix-jsonl", str(mix), "--mix-ratio", "0.15", "--tokenizer", ""],

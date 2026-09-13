@@ -1,7 +1,7 @@
 """训练 BPE 分词器（对应 notebook 01_分词器训练.ipynb）。
 
 把 notebook 里的训练逻辑抽成可复用脚本，便于命令行复现：
-    python scripts/train_tokenizer.py \
+    python scripts/data/train_tokenizer.py \
         --data dataset/pretrain_t2t.jsonl \
         --output models/tokenizer_v3 \
         --vocab-size 32000

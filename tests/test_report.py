@@ -149,3 +149,45 @@ def test_sft_stage_curves_are_rendered():
     assert "**sft_v5_cot_easy**" in md
     # 没有下游曲线时给出提示而不是空表
     assert "尚未产出：等待下游 SFT/CoT 阶段" in render(_base_dict({}))
+
+
+# ───────────── 曲线来源：tensorboard 过大时改用日志重建（实测 2GB/286k 步） ─────────────
+_LOG_SAMPLE = """\
+2026-09-13 08:00:00 lr=0.0006, train_loss: 5.20, eval_loss: 5.11, grad_norm=1.10, steps: 2000/412000
+2026-09-13 08:05:00 lr=0.0006, train_loss: 3.30, eval_loss: 3.20, grad_norm=0.70, steps: 4000/412000
+2026-09-13 08:10:00 lr=0.0006, train_loss: 3.00, eval_loss: 2.95, grad_norm=0.60, steps: 6000/412000
+不是日志行的一行
+2026-09-13 08:15:00 lr=0.0005, train_loss: 2.80, eval_loss: 2.80, grad_norm=0.55, steps: 8000/412000
+"""
+
+
+def test_curve_from_log_rebuilds_eval_curve(tmp_path):
+    """日志重建：每秒级可读，点、吞吐、ETA 都要对。"""
+    from scripts.report_training import curve_from_log
+    p = tmp_path / "run.log"
+    p.write_text(_LOG_SAMPLE, encoding="utf-8")
+    c = curve_from_log(str(p), tokens_per_step=4096)
+    assert [s for s, _ in c["eval"]] == [2000, 4000, 6000, 8000]
+    assert c["eval"][0][1] == 5.11 and c["eval"][-1][1] == 2.80
+    assert c["tail_train_loss"] == 2.80
+    # 最后三个 eval 点：4000→8000 步用 10 分钟 ⇒ 4000*4096/600 ≈ 27.3k tok/s
+    assert 26000 < c["tail_tok_s"] < 29000
+    assert c["max_steps"] == 412000 and c["eta_hours"] > 0
+    assert c["source"] == "log"
+
+
+def test_pick_curve_falls_back_to_log_when_tb_is_huge(tmp_path, monkeypatch):
+    """事件目录超过阈值时必须走日志，而不是去解析几 GB 直方图。"""
+    import scripts.report_training as rt
+    run = tmp_path / "pretrain_demo"
+    (run / "tensorboard").mkdir(parents=True)
+    (run / "tensorboard" / "events.out").write_bytes(b"x" * 1024)
+    (tmp_path / "pretrain_demo.log").write_text(_LOG_SAMPLE, encoding="utf-8")
+
+    monkeypatch.setattr(rt, "TB_MAX_BYTES", 1)          # 任何 tb 都算"过大"
+    c = rt._pick_curve(str(run), {}, str(tmp_path / "pretrain_demo.log"))
+    assert c["source"] == "log" and c["n_eval"] == 4 and c["tb_bytes"] == 1024
+
+    monkeypatch.setattr(rt, "TB_MAX_BYTES", 10**9)      # 阈值放宽 → 回到 tensorboard 分支
+    c2 = rt._pick_curve(str(run), {}, str(tmp_path / "pretrain_demo.log"))
+    assert c2["source"] == "log", "假 events 文件读不出标量时应回退到日志而不是空曲线"

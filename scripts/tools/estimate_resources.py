@@ -4,10 +4,10 @@
 
 用法示例：
     # 教程默认配置（134M）
-    python scripts/estimate_resources.py
+    python scripts/tools/estimate_resources.py
 
     # 自定义 + 指定 GPU 与数据量
-    python scripts/estimate_resources.py --emb-dim 1024 --n-layers 24 --n-heads 16 \
+    python scripts/tools/estimate_resources.py --emb-dim 1024 --n-layers 24 --n-heads 16 \
         --gpu rtx4090 --tokens 2e8
 
 说明：结果仅作量级参考——吞吐按「算力线性、参数量反比」从 RTX 2060 实测锚点外推，
@@ -17,7 +17,7 @@ import argparse
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 from minigpt.config import estimate_params  # noqa: E402  (参数量公式的单一实现)
 

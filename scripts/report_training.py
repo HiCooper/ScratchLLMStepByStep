@@ -95,6 +95,71 @@ def _token_matched(curve: dict, step: int, tol: float = 0.03):
     return min(pts, key=lambda p: abs(p[0] - step)) if pts else None
 
 
+# 事件目录超过这个体量就改用日志重建曲线。实测：开了 log_hist_every 的长训，
+# 282k 步时事件目录已 2.0GB（单个文件 1.5GB），解析要几分钟；而日志里每个 eval 点
+# 本来就有一行（step/train_loss/eval_loss/时间戳），秒级可读。
+TB_MAX_BYTES = 200 * 1024 * 1024
+
+_LOG_LINE = re.compile(
+    r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) lr=([\d.eE+-]+), train_loss: ([\d.]+), "
+    r"eval_loss: ([\d.]+), grad_norm=([\d.]+), steps: (\d+)/(\d+)")
+
+
+def _tb_bytes(run_dir: str) -> int:
+    tb = os.path.join(run_dir, "tensorboard")
+    if not os.path.isdir(tb):
+        return 0
+    try:
+        return sum(os.path.getsize(os.path.join(tb, f)) for f in os.listdir(tb))
+    except OSError:
+        return 0
+
+
+def _seconds_between(t0: str, t1: str) -> float:
+    try:
+        return (datetime.strptime(t1, "%Y-%m-%d %H:%M:%S")
+                - datetime.strptime(t0, "%Y-%m-%d %H:%M:%S")).total_seconds()
+    except ValueError:
+        return 0.0
+
+
+def curve_from_log(log_path: str, tokens_per_step: int = 4096) -> dict:
+    """从训练日志重建 eval 曲线（tensorboard 过大时的兜底，秒级）。
+
+    日志行形如
+      `2026-09-13 08:25:50 lr=0.00012, train_loss: 2.41, eval_loss: 2.38, grad_norm=0.5, steps: 282000/412000`
+    吞吐用相邻 eval 点的（步数差 / 时间差）估——够排期用，且不受直方图体积影响。
+    """
+    ev, stamps, tail_train, total = [], [], None, None
+    try:
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                m = _LOG_LINE.match(line.strip())
+                if not m:
+                    continue
+                ts, _lr, tr, el, _gn, step, ttl = m.groups()
+                ev.append((int(step), float(el)))
+                tail_train = float(tr)
+                total = int(ttl)
+                stamps.append((int(step), ts))
+    except OSError:
+        return {"eval": [], "tail_tok_s": None, "tail_train_loss": None, "eta_hours": None,
+                "n_eval": 0, "source": "log"}
+    tok_s = None
+    if len(stamps) >= 3:
+        (s0, t0), (s1, t1) = stamps[-3], stamps[-1]
+        dt = _seconds_between(t0, t1)
+        if dt > 0 and s1 > s0:
+            tok_s = (s1 - s0) * tokens_per_step / dt
+    out = {"eval": ev, "tail_tok_s": tok_s, "tail_train_loss": tail_train,
+           "eta_hours": None, "n_eval": len(ev), "source": "log"}
+    if tok_s and ev and total and ev[-1][0] < total:
+        out["max_steps"] = total
+        out["eta_from_step"] = ev[-1][0]
+        out["eta_hours"] = (total - ev[-1][0]) * tokens_per_step / tok_s / 3600.0
+    return out
+
+
 def read_tb(run_dir: str) -> dict:
     """读取 run 目录下 tensorboard 事件里的曲线；任何异常都降级为 {}（绝不因报告而失败）。
 
@@ -153,7 +218,7 @@ def _spark(values, width: int = 48) -> str:
 def _loss_noise(eval_rows) -> float | None:
     """验证集上 eval_loss 的 1σ 统计噪声 ≈ 1/√(验证窗口数)。
 
-    口径与 `scripts/audit_dataset.py` 的 split 检查一致（那边是 1/√(val_tok/(ctx-1))，
+    口径与 `scripts/data/audit_dataset.py` 的 split 检查一致（那边是 1/√(val_tok/(ctx-1))，
     等价于 1/√(窗口数)），不要在两处各写一个公式。
 
     为什么值得写进报告：v5 的验证切分是 511 个窗口，噪声约 ±0.044——
@@ -164,6 +229,39 @@ def _loss_noise(eval_rows) -> float | None:
         return 1.0 / math.sqrt(n) if n > 0 else None
     except (TypeError, ValueError):
         return None
+
+
+def tokens_per_step_of(cfg: dict, default: int = 4096) -> int:
+    """batch × (ctx-1)，用于从日志时间戳估吞吐。"""
+    try:
+        model = cfg.get("model") or {}
+        train = cfg.get("train") or {}
+        bs = int(train.get("batch_size") or 8)
+        ctx = int(model.get("model_context_length") or 512)
+        return bs * max(ctx - 1, 1)
+    except (TypeError, ValueError):
+        return default
+
+
+def _pick_curve(run_dir: str, cfg: dict, log_path: str) -> dict:
+    """优先 tensorboard；事件目录过大（长训记了直方图）就改用日志重建。
+
+    实测教训：v5 跑到 282k 步时 tensorboard 已 2.0GB（单文件 1.5GB、绝大部分是直方图），
+    用 EventAccumulator 解析要几分钟且吃内存；交付报告不该被"日志体积"拖住。
+    """
+    size = _tb_bytes(run_dir)
+    if size and size <= TB_MAX_BYTES:
+        c = _curve_summary(run_dir, cfg)
+        if c.get("eval"):
+            c["source"] = "tensorboard"
+            c["tb_bytes"] = size
+            return c
+    c = curve_from_log(log_path, tokens_per_step_of(cfg))
+    c["tb_bytes"] = size
+    if not c["eval"] and size and size <= TB_MAX_BYTES:
+        c = _curve_summary(run_dir, cfg)      # 日志缺行时再回到 tensorboard
+        c["source"] = "tensorboard"
+    return c
 
 
 def collect(cp: str | None = None):
@@ -178,7 +276,7 @@ def collect(cp: str | None = None):
         if not os.path.isdir(run_dir):
             continue
         cfg = load(os.path.join(run_dir, "config.json")) or {}
-        c = _curve_summary(run_dir, cfg)
+        c = _pick_curve(run_dir, cfg, os.path.join(cp, os.path.basename(run_dir) + ".log"))
         if c["eval"]:
             data["curves"][os.path.basename(run_dir)] = c
     # SFT/CoT 阶段同样写了 tensorboard（sft_trainer 会建 SummaryWriter），
@@ -187,7 +285,7 @@ def collect(cp: str | None = None):
         if not os.path.isdir(run_dir):
             continue
         cfg = load(os.path.join(run_dir, "config.json")) or {}
-        c = _curve_summary(run_dir, cfg)
+        c = _pick_curve(run_dir, cfg, os.path.join(cp, os.path.basename(run_dir) + ".log"))
         if c["eval"]:
             data["sft_curves"][os.path.basename(run_dir)] = c
     for path in sorted(glob.glob(os.path.join(cp, "pretrain_*", "metrics.json"))):
@@ -298,7 +396,10 @@ def render(d: dict) -> str:
         msg = "（训练进行中：`metrics.json` 在 run 结束时才落盘，实时曲线见 §1.5）" if d.get("curves") else "（暂无）"
         L.append(f"| {msg} | | | | | | | | | |")
 
-    L += ["", "## 1.5 预训练 eval_loss 曲线与吞吐（tensorboard）", ""]
+    L += ["", "## 1.5 预训练 eval_loss 曲线与吞吐", "",
+          "> 曲线来源随体量自动选择：小 run 直接读 tensorboard 标量；开了 `log_hist_every` 的长训"
+          "（实测 286k 步时事件目录已 2.2GB、绝大部分是直方图）改用训练日志重建——日志每个 eval 点"
+          "本来就有一行，秒级可读，避免交付报告被几 GB 直方图拖住。", ""]
     if d.get("curves"):
         for run, c in sorted(d["curves"].items()):
             ev = c["eval"]
@@ -308,7 +409,10 @@ def render(d: dict) -> str:
             thr = "—" if not tps else f"{tps / 1000:.1f}k tok/s"
             prog = f"{ev[-1][0]}" + (f"/{c['max_steps']}" if c.get("max_steps") else "")
             eta_s = "—" if eta is None else f"约 {eta:.1f} h（自 step {c.get('eta_from_step')} 起）"
-            L += [f"### {run} — 最新 step {prog}，{c['n_eval']} 个评估点", ""]
+            src = c.get("source") or "tensorboard"
+            tb = c.get("tb_bytes") or 0
+            src_txt = f"{src}" + (f"（事件目录 {tb / 1e9:.2f}GB）" if tb > 1e8 else "")
+            L += [f"### {run} — 最新 step {prog}，{c['n_eval']} 个评估点（来源：{src_txt}）", ""]
             if len(vals) >= 2:
                 L += [f"`{_spark(vals)}`（左早右晚，最低 {min(vals):.4f} @step {ev[lo_i][0]}）", ""]
             L += ["| 指标 | 值 |", "|---|---|",

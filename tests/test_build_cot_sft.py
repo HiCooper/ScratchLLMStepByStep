@@ -11,7 +11,7 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                "scripts"))
+                                "scripts", "data"))   # 造数据脚本已按角色归到 scripts/data/
 
 import build_cot_sft as cot  # noqa: E402
 

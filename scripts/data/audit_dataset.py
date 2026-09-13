@@ -8,9 +8,9 @@
     SFT 训练集与评测集泄漏、CoT 协议埋点、parquet 下载完整性、磁盘与 token 预算。
 
 用法：
-    python scripts/audit_dataset.py                 # 全量（含 1.2GB 语料单遍扫描，约 1-2 分钟）
-    python scripts/audit_dataset.py --quick         # 跳过语料扫描，只查 bin/切分/SFT/parquet
-    python scripts/audit_dataset.py --json out.json # 落盘机器可读报告
+    python scripts/data/audit_dataset.py                 # 全量（含 1.2GB 语料单遍扫描，约 1-2 分钟）
+    python scripts/data/audit_dataset.py --quick         # 跳过语料扫描，只查 bin/切分/SFT/parquet
+    python scripts/data/audit_dataset.py --json out.json # 落盘机器可读报告
 
 退出码：存在 BLOCKER 时返回 1（可直接作为训练前的门禁）。
 """
@@ -26,7 +26,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 import numpy as np  # noqa: E402
 
@@ -61,7 +61,7 @@ def audit_tokenizer() -> int | None:
     from transformers import AutoTokenizer
     tok_dir = Path(DataConfig().tokenizer_dir)
     if not tok_dir.exists():
-        add("BLOCKER", "tokenizer", f"不存在 {tok_dir}", "先跑 scripts/train_tokenizer.py")
+        add("BLOCKER", "tokenizer", f"不存在 {tok_dir}", "先跑 scripts/data/train_tokenizer.py")
         return None
     tok = AutoTokenizer.from_pretrained(str(tok_dir))
     add("OK", "tokenizer", f"{tok_dir.name} vocab={len(tok)} eos={tok.eos_token_id} "
@@ -85,7 +85,7 @@ def audit_bins(vocab: int | None) -> list[dict]:
 
         if meta is None:
             add("WARN", f"bin:{p.name}", "缺 .meta.json（dtype 只能按 uint16 猜）",
-                "用 scripts/build_pretrain_bin.py 重建才有 meta")
+                "用 scripts/data/build_pretrain_bin.py 重建才有 meta")
             dtype = "uint16"
         else:
             dtype = meta.get("dtype", "uint16")
@@ -314,7 +314,7 @@ def audit_cot_disjoint(do_scan: bool) -> None:
             (add("OK", f"cot-disjoint:{eval_name}", detail)
              if hit == 0 and expr_hit == 0 else
              add("BLOCKER", f"cot-disjoint:{eval_name}", detail,
-                 "评测集被训练集污染：重跑 scripts/build_cot_sft.py 重建"))
+                 "评测集被训练集污染：重跑 scripts/data/build_cot_sft.py 重建"))
         else:
             add("WARN" if rate > 0.3 else "OK", f"cot-overlap:{eval_name}",
                 f"与 {train_name} 重合 {rate:.1%}（历史非 disjoint 口径，仅作对照）")
@@ -367,7 +367,7 @@ def audit_parquet() -> None:
                 f"隐藏目录 ._____temp 里有 {len(corrupt_in_temp)} 个**损坏**分片（半截下载），"
                 f"且 glob(**/*.parquet) 不匹配隐藏目录 → 直接转换会静默少这些文件。"
                 f"续传：modelscope download --dataset <repo> --local_dir <该子目录> "
-                f"--include <缺失分片>（本轮已按此修复 8 个，可用 scripts/audit_dataset.py 复核）")
+                f"--include <缺失分片>（本轮已按此修复 8 个，可用 scripts/data/audit_dataset.py 复核）")
         elif temp:
             add("WARN", f"parquet:{root.name}", detail,
                 f"隐藏目录里有 {len(temp)} 个可解析的 parquet，glob 看不到它们 → "

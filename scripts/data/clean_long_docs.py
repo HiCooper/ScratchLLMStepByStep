@@ -18,7 +18,7 @@
   5) 输出 `{"text": ...}` jsonl + 清洗报告（各过滤器的丢弃量、长度分布、语言占比）。
 
 用法：
-    python scripts/clean_long_docs.py --src dataset/IndustryCorpus2_mathematics_statistics_high \\
+    python scripts/data/clean_long_docs.py --src dataset/IndustryCorpus2_mathematics_statistics_high \\
         --out dataset/domain/math_clean.jsonl --chunk-chars 2000 --target-chars 500000000 \\
         --shuffle-files --seed 20260912
 """
@@ -34,7 +34,7 @@ import random
 import re
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 SEP_LINE = re.compile(r"^\s*([-=*_~#]{3,}|-{2,}\s*)\s*$")
 HEADER_LINE = re.compile(r"^\s{0,3}(#{1,6}\s+\S|[-=]{4,}\s*$)")

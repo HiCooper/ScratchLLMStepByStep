@@ -6,14 +6,14 @@
 #
 # 产物：models/checkpoints/ppl_code_domain_<标签>.json、models/checkpoints/TRAINING_REPORT.md
 #
-# 用法：TAG=domain bash scripts/run_domain_compare.sh
+# 用法：TAG=domain bash scripts/experiments/run_domain_compare.sh
 #
 # ⚠️ 下面的默认 checkpoint 只作示例：本仓库的历史 run 目录已清理，默认路径多半不存在，
 #    脚本会打印"跳过不存在的 …"并继续。请用环境变量指向你自己的产物，例如：
 #      DOM_CKPT=models/checkpoints/pretrain_v3_domain/final.pt \
-#      BASE_CKPT=models/checkpoints/pretrain_v3/final.pt bash scripts/run_domain_compare.sh
+#      BASE_CKPT=models/checkpoints/pretrain_v3/final.pt bash scripts/experiments/run_domain_compare.sh
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 TOK="${TOK:-models/tokenizer_v3}"
 TAG="${TAG:-domain}"

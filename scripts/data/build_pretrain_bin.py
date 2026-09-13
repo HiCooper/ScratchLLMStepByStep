@@ -1,12 +1,12 @@
 """数据管线（生产）：jsonl -> .bin + .meta.json，并支持 info 校验。
 
 用法：
-    python scripts/build_pretrain_bin.py build \
+    python scripts/data/build_pretrain_bin.py build \
         --corpus-jsonl dataset/pretrain_t2t.jsonl \
         --tokenizer-dir models/tokenizer_v3 \
         --out-bin dataset/bins/pretrain_qwen.bin \
         --max-lines 300000
-    python scripts/build_pretrain_bin.py info --bin dataset/bins/pretrain_qwen.bin
+    python scripts/data/build_pretrain_bin.py info --bin dataset/bins/pretrain_qwen.bin
 
 并行：`--nproc N` 按**行首对齐**把语料切成 N 段并行 tokenize，再按序拼接
 （实测 3.24G 字符的通用语料单进程约 65 分钟；本机 6 核可压到 ~12 分钟）。
@@ -20,7 +20,7 @@ import os
 import shutil
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 from transformers import AutoTokenizer  # noqa: E402
 

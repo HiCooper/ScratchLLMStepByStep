@@ -13,7 +13,7 @@ bash skills/minigpt-train/scripts/preflight.sh
 
 # 1.5) 数据集体检（只读，建议每次改语料后/开训前跑）：jsonl 内容质量、.bin↔meta↔分词器对账、
 #      训练/验证切分预览、SFT 泄漏与 CoT 零重合、parquet 下载完整性、token 预算。有 BLOCKER 返回 1
-python scripts/audit_dataset.py            # --quick 跳过 1.2GB 语料扫描；--json 落盘报告
+python scripts/data/audit_dataset.py            # --quick 跳过 1.2GB 语料扫描；--json 落盘报告
 
 # 2) 一键流水线（幂等；--smoke 约 5 分钟验证链路，--full 完整训练+SFT+CoT+评测）
 bash skills/minigpt-train/scripts/pipeline.sh --smoke
@@ -50,7 +50,7 @@ bash skills/minigpt-train/scripts/pipeline.sh --full
 2. 长训练必须同时运行 `scripts/checkpoint_janitor.sh`（每目录只留最近 N 个 checkpoint，单个 ~585MB），避免磁盘写满。
 3. 续训用 `--paths_last_checkpoint_path <latest checkpoint-*.pth>`；推荐直接用 `scripts/train_pretrain_resilient.sh`（崩溃自动续跑）。
 4. 不要覆盖用户数据；不要提交 `models/`、`dataset/`（已在 `.gitignore`）；代码改动跑 `pytest tests/ -q` 后提交。
-5. **建 bin / 开训前先跑完整体检** `python scripts/audit_dataset.py`（别加 `--quick`，它会跳过语料扫描）：
+5. **建 bin / 开训前先跑完整体检** `python scripts/data/audit_dataset.py`（别加 `--quick`，它会跳过语料扫描）：
    实测教训是一次脏行让建 bin 在 95%、65 分钟后崩溃且没落 meta，而体检一行就报出来了。
    `tokenize_jsonl_to_bin` 现在会跳过脏行并写进 `meta.bad_lines`，但先体检便宜得多。
 6. 汇报格式：进度(step/总步数)、eval_loss 变化、吞吐与 ETA、产物路径、关键样例。

@@ -36,7 +36,7 @@
 统一从 **ModelScope** 下载（国内直连），分词器训练与预训练共用 [`gongjy/minimind_dataset`](https://www.modelscope.cn/datasets/gongjy/minimind_dataset) 的 `pretrain_t2t.jsonl`：
 
 ```bash
-bash scripts/download_data.sh          # 下载到 dataset/
+bash scripts/data/download_data.sh          # 下载到 dataset/
 ```
 
 | 用途 | 文件 | 大小 |
@@ -48,7 +48,7 @@ bash scripts/download_data.sh          # 下载到 dataset/
 > **各训练阶段用到哪些数据源、规模多大、怎么生成** → 见 [`dataset/README.md`](./dataset/README.md)（唯一详述处）。
 
 > ⚠️ 该语料是**长段落**文本，字节级 BPE 预分词会把整段中文当成一个超长「词」，全量训练分词器会 OOM；
-> 用 `scripts/train_tokenizer.py --max-lines 150000`（约 150MB）即可。
+> 用 `scripts/data/train_tokenizer.py --max-lines 150000`（约 150MB）即可。
 
 ## 💥 运行环境
 
@@ -70,7 +70,7 @@ fp16 + AdamW 训练时按 **16 字节/参数**估显存（fp16 权重 2 + 梯度
 | 超大 | 1280/32/20 | 711M | ~11.4GB | 24GB | — |
 
 > 表内「超大」是相对**消费级 GPU 从零训练**的语境（711M 绝对尺度上仍属入门级；主流开源模型 7B 起跳）。
-> 交互式估算：`python scripts/estimate_resources.py`。
+> 交互式估算：`python scripts/tools/estimate_resources.py`。
 
 ## 💥 目录结构
 
@@ -177,7 +177,7 @@ bash skills/minigpt-train/scripts/pipeline.sh --full --hours 10
 
 **结论**：10 小时把同口径 ppl 从 **33.56 降到 15.82**（规模换质量）；领域续训把代码 ppl **84.56 → 28.02（−67%）**，
 代价是通用 ppl **15.82 → 22.93（+45%）**——15% 混料不足以抵消 lr=1e-4 一步到位的偏移，属典型部分灾难性遗忘。
-**领域自适应必须双口径验收**（`bash scripts/run_domain_compare.sh`），并按需降 lr（1e-5~3e-5）、提高混料比（30%+）或减少步数。
+**领域自适应必须双口径验收**（`bash scripts/experiments/run_domain_compare.sh`），并按需降 lr（1e-5~3e-5）、提高混料比（30%+）或减少步数。
 
 ### 思考模式（CoT）与 SFT
 
@@ -194,7 +194,7 @@ bash skills/minigpt-train/scripts/pipeline.sh --full --hours 10
 ### ⚠️ CoT 评测集口径修正（重要）
 
 `build_cot_sft.py` 旧实现靠"换 seed"避免训练/评测重合，但 easy profile 默认 `--easy-max 9`
-的题目空间太小，切不出真正不相交的留出集。**实测**（`scripts/audit_dataset.py`）：
+的题目空间太小，切不出真正不相交的留出集。**实测**（`scripts/data/audit_dataset.py`）：
 
 | 比较 | 题面级重合 |
 |---|---|
@@ -213,9 +213,9 @@ bash skills/minigpt-train/scripts/pipeline.sh --full --hours 10
 ### 下一步实验：容量 vs 步数（isotoken 消融）
 
 ```bash
-DRY_RUN=1 bash scripts/run_capacity_ablation.sh     # 只打印命令，无 GPU 也能检查
+DRY_RUN=1 bash scripts/experiments/run_capacity_ablation.sh     # 只打印命令，无 GPU 也能检查
 setsid nohup env TAG=cap768 TOKENS=8.6e8 BS=16 ACCUM=1 \
-  bash scripts/run_capacity_ablation.sh > models/checkpoints/cap768.log 2>&1 &
+  bash scripts/experiments/run_capacity_ablation.sh > models/checkpoints/cap768.log 2>&1 &
 ```
 768/12/12（109.6M）在**同样 8.6 亿 tokens** 下对比 512/10/8（47.9M）：若 hard CoT 显著提升则"容量墙"成立，
 应继续扩宽/加深而非加步数；若持平则瓶颈在数据/监督方式。需单卡 ≥16GB（本仓库开发环境无 GPU，**该实验尚未执行**）。
@@ -227,8 +227,8 @@ pytest tests/             # 231 passed + 1 skipped，CPU 即可，无需数据�
 ```
 
 覆盖注意力/模型结构/初始化/数据管线与切分/SFT 掩码/训练器（LR 调度、记账、续训语义、原子写、权重衰减分组）/
-checkpoint 反推与宽容加载/评测脚本口径等。端到端验证（需 GPU）：`scripts/validate_pretrain.py`、`scripts/validate_ddp.py`。
-环境排查：`python scripts/check_env.py`。
+checkpoint 反推与宽容加载/评测脚本口径等。端到端验证（需 GPU）：`scripts/tools/validate_pretrain.py`、`scripts/tools/validate_ddp.py`。
+环境排查：`python scripts/tools/check_env.py`。
 
 ## 🤖 交给 Agent 自动训练（Skill）
 
