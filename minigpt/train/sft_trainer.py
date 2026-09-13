@@ -150,11 +150,8 @@ def main():
     trainer.train()
 
     if rank0:
-        final_path = os.path.join(pc.output_dir, "final.pt")
-        if os.path.exists(final_path):
-            ck = torch.load(final_path, map_location="cpu", weights_only=False)
-            ck["config"] = gpt.to_dict()
-            torch.save(ck, final_path)
+        # final.pt 的 config 由 extra_ckpt（第 148 行）+ checkpoint_io 原子写负责，
+        # 这里不再就地 torch.save 重写：'wb' 截断重写一旦被打断就是坏 checkpoint。
         metrics = dict(getattr(trainer, "final_metrics", {}) or {})
         with open(os.path.join(pc.output_dir, "metrics.json"), "w", encoding="utf-8") as f:
             json.dump(metrics, f, ensure_ascii=False, indent=2)

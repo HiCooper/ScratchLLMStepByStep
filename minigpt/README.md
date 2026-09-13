@@ -22,6 +22,7 @@ minigpt/
     ├── checkpoint_io.py    # checkpoint 原子读写 + RNG/缩放器恢复
     ├── optim.py            # 优化器构造（weight decay 分组）
     ├── metrics.py          # TensorBoard 指标
+    ├── curve_utils.py      # 从评估点估速率（剔除停机空档）——看板与交付报告的唯一实现
     ├── pretrainer.py       # 预训练入口（支持 DDP）
     ├── sft_trainer.py      # SFT 入口
     └── pretrainer_single.py # 单卡教学版训练器（notebook 09/10 使用）

@@ -123,14 +123,11 @@ def main():
     trainer.extra_ckpt = gpt_cfg.to_dict()   # 周期 checkpoint 与 final.pt 都带 config
     trainer.set_dataset(train_set, eval_set)
     trainer.train()
-
-    # 给 final.pt 补充 config，使推理/评估脚本可直接读取
-    final_path = os.path.join(pc.output_dir, "final.pt")
-    if rank0 and os.path.exists(final_path):
-        ck = torch.load(final_path, map_location="cpu", weights_only=False)
-        ck["config"] = gpt_cfg.to_dict()
-        torch.save(ck, final_path)
-        print(f"[pretrainer] config injected -> {final_path}")
+    # 注意：final.pt 由 Trainer._save_model -> checkpoint_io.save_training_checkpoint 落盘，
+    # 走 tmp+fsync+os.replace 原子写，且第 123 行的 extra_ckpt 已把 config 一并写入。
+    # 这里以前有一段"训练后再 torch.load + torch.save 补 config"的代码：既是死代码，
+    # 又用 'wb' 截断重写——中途被 OOM-kill/磁盘满打断就留下坏文件，而
+    # train_pretrain_resilient.sh 恰以 `[ -f final.pt ]` 判定训练成功，会把报废的 run 当成功。
 
     # 主进程落盘指标与采样
     if rank0:

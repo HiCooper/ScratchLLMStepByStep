@@ -25,6 +25,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from minigpt.config import estimate_params_from_config  # noqa: E402
+from minigpt.train.curve_utils import rate_from_evals  # noqa: E402
 from datetime import datetime
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -46,14 +47,26 @@ def read_text(path, limit=1200):
         return ""
 
 
-def _pick(cfg: dict, name: str, default=None):
-    """同时兼容 flat(emb_dim) 与 nested(model_emb_dim / 嵌套 dict) 两种 config 结构。"""
+def _pick(cfg: dict, name: str, default=None, section: str = "model"):
+    """按 section 读配置项，兼容仓库里出现过的三种 config 结构：
+
+    - nested 规范：`{"model": {"context_length": 512}}` ← `dump_run_config` 唯一在写的结构
+    - nested 旧前缀：`{"model": {"model_context_length": 512}}`（早期 dump）
+    - flat：`{"emb_dim": ...}` / `{"model_context_length": ...}`（老产物与测试夹具）
+
+    以前只认后两种，于是**当下唯一在写的** nested 规范结构永远取不到值，静默回落到
+    默认 512：ctx1024 的 run 报告里吞吐被算成实际值的 1/4，且与 §6 的 token 预算换算
+    互相矛盾，而没有任何东西会报红。
+    """
     if not isinstance(cfg, dict):
         return default
-    if "model" in cfg and isinstance(cfg["model"], dict) and f"model_{name}" in cfg["model"]:
-        return cfg["model"][f"model_{name}"]
-    for key in (name, f"model_{name}"):
-        if key in cfg:
+    sec = cfg.get(section)
+    if isinstance(sec, dict):
+        for key in (name, f"{section}_{name}"):
+            if sec.get(key) is not None:
+                return sec[key]
+    for key in (name, f"{section}_{name}"):
+        if cfg.get(key) is not None:
             return cfg[key]
     return default
 
@@ -123,12 +136,19 @@ def _seconds_between(t0: str, t1: str) -> float:
         return 0.0
 
 
-def curve_from_log(log_path: str, tokens_per_step: int = 4096) -> dict:
+def curve_from_log(log_path: str, tokens_per_step: int = 8 * 511) -> dict:
     """从训练日志重建 eval 曲线（tensorboard 过大时的兜底，秒级）。
 
     日志行形如
       `2026-09-13 08:25:50 lr=0.00012, train_loss: 2.41, eval_loss: 2.38, grad_norm=0.5, steps: 282000/412000`
-    吞吐用相邻 eval 点的（步数差 / 时间差）估——够排期用，且不受直方图体积影响。
+
+    吞吐走 `curve_utils.rate_from_evals`（与看板同一实现）：取最近区间的中位数并丢弃
+    >3× 中位数的空档。以前这里是"最后两点相减"——机器 2026-09-12 重启后，一次 v5 长训
+    的两个评估点之间夹着数小时停机，报告就写出 ~0.9k tok/s / ETA 168h（实际 ~23k/~7h），
+    而这条日志分支正是长训的默认路径（事件目录 >200MB）。
+
+    `tokens_per_step` 只影响**展示的吞吐**，不影响 ETA：ETA = 剩余步数 × s_per_step，
+    与 tokens_per_step 无关（下面直接按 s_per_step 算，避免这个量被写错两次）。
     """
     ev, stamps, tail_train, total = [], [], None, None
     try:
@@ -144,19 +164,18 @@ def curve_from_log(log_path: str, tokens_per_step: int = 4096) -> dict:
                 stamps.append((int(step), ts))
     except OSError:
         return {"eval": [], "tail_tok_s": None, "tail_train_loss": None, "eta_hours": None,
-                "n_eval": 0, "source": "log"}
-    tok_s = None
-    if len(stamps) >= 3:
-        (s0, t0), (s1, t1) = stamps[-3], stamps[-1]
-        dt = _seconds_between(t0, t1)
-        if dt > 0 and s1 > s0:
-            tok_s = (s1 - s0) * tokens_per_step / dt
-    out = {"eval": ev, "tail_tok_s": tok_s, "tail_train_loss": tail_train,
-           "eta_hours": None, "n_eval": len(ev), "source": "log"}
-    if tok_s and ev and total and ev[-1][0] < total:
+                "n_eval": 0, "source": "log", "tokens_per_step": tokens_per_step}
+    # 至少 3 个点：有 ≥2 个区间才谈得上"用中位数剔掉停机空档"，两个点时纯属照用
+    # （rate_from_evals 的已知局限，报告这边宁可不给数也不给错数）。
+    rate = rate_from_evals([{"step": s, "ts": t} for s, t in stamps[-6:]],
+                           tokens_per_step) if len(stamps) >= 3 else None
+    out = {"eval": ev, "tail_tok_s": (rate or {}).get("tok_per_s"),
+           "tail_train_loss": tail_train, "eta_hours": None, "n_eval": len(ev),
+           "source": "log", "tokens_per_step": tokens_per_step}
+    if rate and ev and total and ev[-1][0] < total:
         out["max_steps"] = total
         out["eta_from_step"] = ev[-1][0]
-        out["eta_hours"] = (total - ev[-1][0]) * tokens_per_step / tok_s / 3600.0
+        out["eta_hours"] = (total - ev[-1][0]) * rate["s_per_step"] / 3600.0
     return out
 
 
@@ -188,17 +207,19 @@ def _curve_summary(run_dir: str, cfg: dict) -> dict:
     tr = [v for _, v in (tb.get("train/loss") or [])[-200:]]
     out = {"eval": ev, "tail_tok_s": (sorted(tps)[len(tps) // 2] if tps else None),
            "tail_train_loss": (sum(tr) / len(tr) if tr else None), "eta_hours": None,
-           "n_eval": len(ev)}
+           "n_eval": len(ev), "tokens_per_step": tokens_per_step_of(cfg)}
     try:
-        max_steps = int(cfg["train"]["max_steps"])
-        batch = int(cfg["train"].get("batch_size") or 8)
-        ctx = int((cfg.get("model") or {}).get("model_context_length") or 512)
+        max_steps = int(_pick(cfg, "max_steps", 0, "train") or 0)
+        # 只有 max_steps 参与 ETA（tokens/step 在 tok/s 口径里自相消），见 tokens_per_step_of
+        if not max_steps:
+            return out
     except Exception:  # noqa: BLE001
         return out
     if out["tail_tok_s"] and ev and ev[-1][0] < max_steps:
         out["max_steps"] = max_steps
         out["eta_from_step"] = ev[-1][0]
-        out["eta_hours"] = (max_steps - ev[-1][0]) * batch * ctx / out["tail_tok_s"] / 3600.0
+        out["eta_hours"] = (max_steps - ev[-1][0]) / out["tail_tok_s"] \
+            * out["tokens_per_step"] / 3600.0
     return out
 
 
@@ -232,13 +253,22 @@ def _loss_noise(eval_rows) -> float | None:
 
 
 def tokens_per_step_of(cfg: dict, default: int = 4096) -> int:
-    """batch × (ctx-1)，用于从日志时间戳估吞吐。"""
+    """一次参数更新吃掉的 token 数 = batch × (ctx-1) × 梯度累积步数（**单卡口径**）。
+
+    - 口径与 `skills/minigpt-train/scripts/preflight.py` 的 `tokens_per_step` 对齐
+      （那边再乘上 `launch.nproc`）。config.json 里没有 world_size，所以 DDP run 这里是
+      单 rank 值：§1.5 展示的 tok/s 对多卡 run 会低报 world_size 倍，属已知局限，报错不说谎。
+    - `ctx` 必须走 `_pick`：以前写死读 `model["model_context_length"]`，而实际 dump 的是
+      `model["context_length"]`，于是任何 ctx1024 预设（24GB+/多卡档位会选它）的吞吐
+      都被算成 1/4。
+    - 注意 ETA **不受**这个值影响（tok/s 与 tokens/step 在 ETA 公式里相消），它只决定
+      报告中"吞吐"那一栏的绝对数值以及 §6 的同 token 预算换算。
+    """
     try:
-        model = cfg.get("model") or {}
-        train = cfg.get("train") or {}
-        bs = int(train.get("batch_size") or 8)
-        ctx = int(model.get("model_context_length") or 512)
-        return bs * max(ctx - 1, 1)
+        bs = int(_pick(cfg, "batch_size", 8, "train") or 8)
+        ctx = int(_pick(cfg, "context_length", 512, "model") or 512)
+        accum = max(1, int(_pick(cfg, "grad_accumulation_steps", 1, "train") or 1))
+        return bs * max(ctx - 1, 1) * accum
     except (TypeError, ValueError):
         return default
 
@@ -258,9 +288,14 @@ def _pick_curve(run_dir: str, cfg: dict, log_path: str) -> dict:
             return c
     c = curve_from_log(log_path, tokens_per_step_of(cfg))
     c["tb_bytes"] = size
-    if not c["eval"] and size and size <= TB_MAX_BYTES:
-        c = _curve_summary(run_dir, cfg)      # 日志缺行时再回到 tensorboard
+    # 日志缺行（改名/被轮转/训练日志没留下 eval 行）时回到 tensorboard。
+    # 这里**不能**再判 `size <= TB_MAX_BYTES`：能走到这一行，要么 tb 超阈、要么
+    # tb 分支读不出标量——两种情况下该条件都为假，兜底永远不可达，结果是"事件目录
+    # 超阈 + 日志缺失"时整条阶段曲线静默消失。宁可慢，也不要空。
+    if not c["eval"] and size:
+        c = _curve_summary(run_dir, cfg)
         c["source"] = "tensorboard"
+        c["tb_bytes"] = size
     return c
 
 
@@ -417,7 +452,7 @@ def render(d: dict) -> str:
                 L += [f"`{_spark(vals)}`（左早右晚，最低 {min(vals):.4f} @step {ev[lo_i][0]}）", ""]
             L += ["| 指标 | 值 |", "|---|---|",
                   f"| 曲线 step:loss | {_points_str(ev)} |",
-                  f"| 末段吞吐（最近 500 步中位数） | {thr} |",
+                  f"| 末段吞吐（中位数，已剔除停机空档；DDP 为单卡口径） | {thr} |",
                   f"| 末段 train_loss（最近 200 步均值） | {_num(c.get('tail_train_loss'))} |",
                   f"| ETA | {eta_s} |"]
             if c.get("noise_sigma"):
@@ -531,22 +566,32 @@ def render(d: dict) -> str:
           f"{math.log(HISTORICAL_BASELINE['perplexity']):.4f} | **{HISTORICAL_BASELINE['perplexity']}** | 它自己的 val |"]
     matched_any = False
     for run, c in sorted(d.get("curves", {}).items()):
-        pt = _token_matched(c, HISTORICAL_BASELINE["step"])
+        # 同 token 预算 ≠ 同 step：批量/ctx/累积一变，一步吃的 token 就不同。
+        # 基线的 211k 步是按 4096 tokens/步 记的，所以这里先把"同预算"换算到本 run 的
+        # 步数刻度（ctx1024 的 run 是 8192 tok/步 ⇒ 等价预算点约 105.5k 步）。
+        # 以前两处都把基准步数写死成 211,000 且 tok 写死 ×4096，于是 ctx1024 的 run
+        # 会在半步数上被拿去和历史基线并列、token 数还少报一半。
+        tps = int(c.get("tokens_per_step") or 4096)
+        target_step = int(round(HISTORICAL_BASELINE["step"] * 4096 / tps))
+        pt = _token_matched(c, target_step)
         if pt is None:
             last = (c.get("eval") or [])[-1] if c.get("eval") else None
             cur = f"当前 {last[0]:,} 步，eval_loss {last[1]:.4f}" if last else "暂无评估点"
-            L.append(f"| `{run}`（本次） | 尚未到 {HISTORICAL_BASELINE['step']:,} 步（{cur}） "
+            L.append(f"| `{run}`（本次） | 尚未到 {target_step:,} 步（{cur}） "
                      "| — | — | — | — | — |")
             continue
         matched_any = True
         ppl = math.exp(min(pt[1], 80.0))
         delta = (ppl / HISTORICAL_BASELINE["perplexity"] - 1) * 100
-        tok = pt[0] * 4096
+        tok = pt[0] * tps
         L.append(f"| `{run}`（本次，同预算点） | {pt[0]:,} | {tok / 1e8:.2f} 亿 | — | {pt[1]:.4f} | "
                  f"**{ppl:.2f}** | 它自己的 val |")
         L += ["", f"同预算点对比：`{run}` perplexity **{ppl:.2f}** vs `{HISTORICAL_BASELINE['run']}` "
                   f"**{HISTORICAL_BASELINE['perplexity']}**（{delta:+.1f}%，负值=更低）。"
                   "如上行所述，这个差里同时含「语料变化」与「验证集变化」，不能单独归因于数据质量。"]
+        if tps != 4096:
+            L += [f"注：本 run 每步 {tps:,} token（历史基线按 4096 记），所以上表的"
+                  f"{target_step:,} 步与基线的 {HISTORICAL_BASELINE['step']:,} 步是等 token 预算的。"]
     if not matched_any and d.get("curves"):
         L.append("")
         L.append("（同预算点还没到：基座跑到 211,000 步后本行会自动出现）")

@@ -41,6 +41,11 @@ class Trainer:
             if self.use_mixed_precision else None
         self.gradient_accumulation_steps = max(1, int(train_args.get("gradient_accumulation_steps", 1)))
         self.micro_step = 0
+        # 本优化步已处理的 token 数（跨 micro-batch 累加，见 _train_step）：吞吐指标
+        # 必须按"一次参数更新"记账，只取最后一个 micro-batch 会让 tok/s 低报 accum 倍
+        self._micro_tokens = 0
+        # DDP 世界大小：rank0 记的指标要乘上它才是**全局**吞吐（否则低报卡数倍）
+        self.world_size = 1
         self.output_dir = train_args.get("output_dir")
         self.last_checkpoint_path = train_args.get("last_checkpoint_path")
         self.train_set = None
@@ -204,6 +209,7 @@ class Trainer:
         
         os.environ['NCCL_DEBUG'] = 'WARN'
         world_size = int(os.environ["WORLD_SIZE"])
+        self.world_size = world_size
         # 超时必须覆盖 rank0 独占的最慢操作（完整 eval + 数百 MB checkpoint 同步落盘，
         # 二者都在 barrier 保护内）。旧值 120s 会在慢盘/大验证集时以 NCCL 超时打挂整轮训练。
         dist.init_process_group(backend="nccl", rank=rank, world_size=world_size,
@@ -345,42 +351,44 @@ class Trainer:
         self.loss_acc.total = 0.0
         self.loss_acc.count = 0
 
-    def _evaluate(self):
+    def _eval_loss(self, loader):
+        """按**监督 token 数加权**的平均 loss（不是"各 batch 均值的均值"）。
+
+        为什么必须按 token 加权：eval loader 是 `drop_last=False`，而 SFT 的 label 带 -100
+        掩码（只监督 assistant 段），batch 内真正参与 loss 的 token 数差异极大——短回复样本
+        可能只有几十个。旧实现 `total_loss/num_batches` 让"只装了 1 条样本的 batch"与满
+        batch 等权：换掉那一条就能让 eval_loss 明显漂移，而 `_record_metrics` 正是拿它跟
+        `best_eval_loss` 比并覆盖 `best.pt` ⇒ 交付链路挑去跑下游的"最优权重"取决于 batch
+        组成而不是模型质量；同一模型换个 batch_size 报出的 loss/perplexity 也不可比。
+
+        预训练没有 -100，分母就是全部位置，两种口径数值相同（向后兼容）。
+        """
         # 这里不能多进程同步，必须用原始Model
         model = self._unwrap()
         model.eval()
-        num_batches = len(self.eval_loader)
-        total_loss = 0
-        
-        for batch in self.eval_loader:
+        total_loss, n_supervised = 0.0, 0
+
+        for batch in loader:
             X, Y = batch[0].to(self.device), batch[1].to(self.device)
             attnmask = batch[2].to(self.device) if len(batch) == 3 else None
             with torch.no_grad():
                 logits = model(X, attention_mask=attnmask)
-            loss = f.cross_entropy(logits.flatten(0, 1), Y.flatten())
-            total_loss += loss.item()
+            # reduction="sum"：先把每个 batch 的 loss 还原成"总和"，再除以全局监督 token 数
+            loss = f.cross_entropy(logits.flatten(0, 1), Y.flatten(), reduction="sum")
+            total_loss += float(loss)
+            # 与 cross_entropy 的默认 ignore_index=-100 保持一致
+            n_supervised += int((Y != -100).sum())
 
         model.train()
-        return total_loss/num_batches
+        return total_loss / n_supervised if n_supervised else 0.0
+
+    def _evaluate(self):
+        return self._eval_loss(self.eval_loader)
 
     def test(self, dataset):
-        """用于对训练的模型进行评估测试"""
-        model = self._unwrap()
-        model.eval()
+        """用于对训练的模型进行评估测试（口径同 _evaluate：按监督 token 加权）"""
         dataloader = DataLoader(dataset, batch_size=self.batch_size, collate_fn=self.batch_collator)
-        num_batches = len(dataloader)
-        total_loss = 0
-        
-        for batch in dataloader:
-            X, Y = batch[0].to(self.device), batch[1].to(self.device)
-            attnmask = batch[2].to(self.device) if len(batch) == 3 else None
-            with torch.no_grad():
-                logits = model(X, attention_mask=attnmask)
-            loss = f.cross_entropy(logits.flatten(0, 1), Y.flatten())
-            total_loss += loss.item()
-        
-        model.train()
-        return total_loss/num_batches  
+        return self._eval_loss(dataloader)
 
     def _check_and_save_checkpoint(self, cur_epoch):
         if self.save_strategy != "step" or self.step % self.save_steps != 0:
@@ -416,6 +424,8 @@ class Trainer:
             else:
                 (loss * scale).backward()
 
+        # 吞吐按整次参数更新记账：累加每个 micro-batch 的 token，DDP 下乘世界大小
+        self._micro_tokens += int(X.numel())
         self.micro_step += 1
         if self.micro_step < self.gradient_accumulation_steps:
             return loss, False
@@ -423,7 +433,8 @@ class Trainer:
         # 累积满 gradient_accumulation_steps 次后，执行一次参数更新
         # 指标钩子在 zero_grad **之前**：直方图需要读到 p.grad（否则 grads/* 永远为空）
         if self.metrics is not None:
-            self.metrics.before_zero_grad(self.step + 1, tokens=int(X.numel()),
+            self.metrics.before_zero_grad(self.step + 1,
+                                          tokens=self._micro_tokens * self.world_size,
                                           batch=(X, Y))
         # 梯度范数必须在 optimizer.step / zero_grad 之前计算，否则梯度已被清零、恒为 0
         if use_amp and self.scaler is not None:
@@ -439,6 +450,7 @@ class Trainer:
             self.optimizer.step()  # 更新参数
         self.optimizer.zero_grad(set_to_none=True)
         self.micro_step = 0
+        self._micro_tokens = 0
         return loss, True
 
     def _train_epoch(self, cur_epoch):

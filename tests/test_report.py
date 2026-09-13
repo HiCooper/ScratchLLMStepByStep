@@ -191,3 +191,87 @@ def test_pick_curve_falls_back_to_log_when_tb_is_huge(tmp_path, monkeypatch):
     monkeypatch.setattr(rt, "TB_MAX_BYTES", 10**9)      # 阈值放宽 → 回到 tensorboard 分支
     c2 = rt._pick_curve(str(run), {}, str(tmp_path / "pretrain_demo.log"))
     assert c2["source"] == "log", "假 events 文件读不出标量时应回退到日志而不是空曲线"
+
+
+def test_pick_curve_falls_back_to_tensorboard_even_when_events_are_huge(tmp_path, monkeypatch):
+    """事件目录超阈 + 日志缺行（改名/轮转）时，兜底必须仍然可达。
+
+    旧实现里那个"日志缺行时再回到 tensorboard"的分支带着 `size <= TB_MAX_BYTES` 条件，
+    而能走到它的两种情况（tb 超阈 / tb 读不出标量）都让该条件为假 ⇒ 分支永远不可达，
+    结果是整条阶段曲线静默消失（交付报告里"缺一段曲线"不会报错）。
+    """
+    import scripts.report_training as rt
+    run = tmp_path / "pretrain_demo"
+    (run / "tensorboard").mkdir(parents=True)
+    (run / "tensorboard" / "events.out").write_bytes(b"x" * 4096)
+    log = tmp_path / "pretrain_demo.log"
+    log.write_text("这一行不是 eval 行，重建不出任何曲线\n", encoding="utf-8")
+
+    monkeypatch.setattr(rt, "TB_MAX_BYTES", 1)          # tb 一律算"过大"
+    monkeypatch.setattr(rt, "_curve_summary",
+                        lambda _d, _c: {"eval": [(2000, 5.0)], "tail_tok_s": None,
+                                        "tail_train_loss": None, "eta_hours": None, "n_eval": 1})
+    c = rt._pick_curve(str(run), {}, str(log))
+    assert c["eval"] == [(2000, 5.0)] and c["source"] == "tensorboard", \
+        f"超阈 + 日志缺行时应回退到 tensorboard，实际 {c.get('source')} / eval={c.get('eval')}"
+
+
+# ───────────── 口径修复：ctx/批量/累积必须一起进 tokens-per-step ─────────────
+def test_tokens_per_step_reads_nested_canonical_config():
+    """`config.json` 写的是 nested 的 `model.context_length`。
+
+    旧实现读的是 `model_context_length`（那种结构只有早期产物与测试夹具有），
+    于是**当下唯一在写的**结构永远取不到值、静默回落 512：ctx1024 的 run 吞吐被算成
+    1/4，且与 §6 的 token 预算换算自相矛盾。
+    """
+    from scripts.report_training import tokens_per_step_of
+    canonical = {"model": {"context_length": 1024, "emb_dim": 512},
+                 "train": {"batch_size": 12, "grad_accumulation_steps": 2}}
+    assert tokens_per_step_of(canonical) == 12 * 1023 * 2
+    # 老结构（flat / nested 带 section 前缀）继续兼容
+    assert tokens_per_step_of({"model_context_length": 1024, "train_batch_size": 12}) == 12 * 1023
+    assert tokens_per_step_of({"model": {"model_context_length": 1024},
+                               "train": {"train_batch_size": 12}}) == 12 * 1023
+    # 完全缺失时用内置默认（batch 8 × ctx 511），与看板的 --tokens-per-step 默认值一致
+    assert tokens_per_step_of({}) == 8 * 511
+
+
+def test_curve_from_log_ignores_restart_gap(tmp_path):
+    """重启的停机空档不能被当成训练变慢。
+
+    真实事故：v5 长训（事件目录 2.2GB ⇒ 走日志分支）报告里写出 ~0.9k tok/s / ETA 168h，
+    实际 ~23k / ~7h —— 因为旧口径只看最后两个评估点，而这两点之间夹着数小时停机。
+    """
+    from scripts.report_training import curve_from_log
+    lines = []
+    for i in range(6):                                  # 21:00 起每 6 分钟一个评估点
+        hh, mm = 21 + (i * 6) // 60, (i * 6) % 60
+        lines.append(f"2026-09-12 {hh:02d}:{mm:02d}:00 lr=0.00012, train_loss: 2.41, "
+                     f"eval_loss: {2.5 - i * 0.01:.2f}, grad_norm=0.5, "
+                     f"steps: {72000 + i * 2000}/412000")
+    lines.append("2026-09-12 23:05:00 lr=0.00012, train_loss: 2.40, eval_loss: 2.42, "
+                 "grad_norm=0.5, steps: 84000/412000")   # 恢复后第一次评估（含 ~5h 停机）
+    p = tmp_path / "run.log"
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    c = curve_from_log(str(p), tokens_per_step=4088)
+    assert 22000 < c["tail_tok_s"] < 23500, f"停机空档被算进速率：{c['tail_tok_s']}"
+    assert c["eta_hours"] < 20, f"ETA 被停机抬高：{c['eta_hours']}"
+    # 反例：照旧口径（最后两点直接相减）会得到约 1.4k tok/s —— 该用例必须能区分两者
+    naive = 2000 * 4088 / ((23 * 3600 + 5 * 60) - (21 * 3600 + 30 * 60))
+    assert naive < 2000 and c["tail_tok_s"] > naive * 10
+
+
+def test_historical_baseline_accounts_for_per_run_token_budget():
+    """§6 的"同 token 预算"必须按本 run 的 tokens/step 换算，而不是写死 211k 步 × 4096。
+
+    ctx1024 的 run 每步 8192 token ⇒ 等价预算点约 105.5k 步；旧实现会在 211k 步上
+    比较（那已是两倍 token），§6 里唯一需要自洽的换算因此失效。
+    """
+    d = _base_dict({"pretrain_ctx1024": {
+        "eval": [(2000, 5.1), (105000, 2.60), (108000, 2.58)],
+        "tail_tok_s": 24000.0, "tail_train_loss": 2.6, "eta_hours": None, "n_eval": 3,
+        "tokens_per_step": 8192}})
+    md = render(d)
+    assert "| `pretrain_ctx1024`（本次，同预算点） | 105,000 | 8.60 亿 |" in md, md
+    assert "每步 8,192 token" in md
