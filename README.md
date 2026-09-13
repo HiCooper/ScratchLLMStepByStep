@@ -6,6 +6,11 @@
 
 适合具备 Python 基础、想深入理解 LLM 原理与工程实现的读者。
 
+> **项目来源**：本仓库是 [golfxiao/ScratchLLMStepByStep](https://github.com/golfxiao/ScratchLLMStepByStep)
+> 的 fork —— 原项目是这套 notebook 教程（正文里的 CSDN 链接即原作者博客）。本仓库在其之上补齐了
+> 生产级训练工程（`scripts/` 的流水线与交付自检、`minigpt/` 的 DDP/AMP/断点续训、`tests/` 回归测试、
+> `skills/minigpt-train/` 操作手册）。**克隆与提问请用本仓库地址**，上游不含这些改动。
+
 ## 💥 章节结构
 
 15 个 notebook 按 `01_`~`15_` 顺序阅读，覆盖「分词器 → 模型结构 → 预训练 → SFT → 推理」全流程：
@@ -124,8 +129,8 @@ checkpoint 原子写（tmp→fsync→rename，失败不破坏上一个可用存�
 ## 💥 快速开始
 
 ```bash
-# 0) 安装
-git clone https://github.com/golfxiao/ScratchLLMStepByStep.git && cd ScratchLLMStepByStep
+# 0) 安装（克隆**本仓库**；上游原教程不含本文档描述的生产工程部分，见上方「项目来源」）
+git clone https://github.com/HiCooper/ScratchLLMStepByStep.git && cd ScratchLLMStepByStep
 pip install -e ".[notebook,dev]"
 
 # 1) 环境体检（只读）：依赖/GPU/显存/磁盘/语料/分词器/bin 词表一致性/单测
