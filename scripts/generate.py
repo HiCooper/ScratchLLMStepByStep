@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import torch  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 
+from minigpt.data.sft_dataset import build_user_content  # noqa: E402
 from minigpt.model.generation import generate_with_thinking  # noqa: E402
 from minigpt.model.checkpoint import build_model_from_checkpoint  # noqa: E402
 
@@ -32,9 +33,18 @@ def load_model(checkpoint_path, tokenizer, n_heads=None):
 
 
 def build_prompt(tokenizer, text, chat):
+    """构造 prompt：chat 模式必须走 `build_user_content`（训练侧的唯一实现）。
+
+    真实隐患：这里以前直接传裸文本，而 SFT 训练侧 user 内容是
+    `instruction + "\\n" + input`——**少一个换行**。sft_trainer 采样 / chat_probe /
+    eval_thinking 早就统一到 `build_user_content` 了，只剩这个 CLI 漏掉，于是同一个
+    模型在 `--chat` 下的表现与训练/评测口径不一致（且这种差异不会报错）。
+    `tests/test_eval_scripts.py::test_all_inference_chat_builders_share_training_format`
+    现在把这里也一起守住了。
+    """
     if not chat:
         return text
-    messages = [{"role": "user", "content": text}]
+    messages = [{"role": "user", "content": build_user_content(text)}]
     return tokenizer.apply_chat_template(messages, tokenize=False,
                                          add_generation_prompt=True)
 

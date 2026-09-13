@@ -52,16 +52,30 @@ def row_prompt(row: dict) -> str:
     return build_user_content(row.get("instruction"), row.get("input"))
 
 
+# 应用题（word problem）的题面特征词。**必须覆盖 build_cot_sft.py 的全部应用题生成器**：
+# 漏一个就会把整类题静默丢进 "other"，而 §4.5 的分档表看不出"少了一类题"。
+# 真实事故：`gen_price`「一本笔记本 X 元，买 Y 本需要多少钱？」与
+# `gen_discount`「一件商品原价 X 元，现在打 N 折，需要付多少钱？」都不命中原关键词表
+# （它只认「多少元/多少本/原有」，而这两类写的是「多少钱」「原价」），于是 hard 集里
+# 约 2/9 的题目全落进 "other" —— 平均准确率看着正常，分档表却整类缺席。
+# 对应的回归测试按生成器逐个断言（tests/test_eval_scripts.py::test_bucket_of_covers_all_generators）。
+_WORD_HINTS = (
+    "苹果", "铅笔", "平均", "剩下", "还剩", "原有", "原价", "一共", "共有",
+    "多少元", "多少本", "多少钱", "多少支", "折扣", "折",
+)
+
+
 def bucket_of(question: str) -> str:
     """把题目按**规模+题型**分桶，用于分档报告准确率。
 
     为什么必须分档：单一平均准确率会把"简单题全对、难题全错"平均成一个看不出问题的数字。
     47.9M 参数在多位数乘加上是**容量墙**（继续堆同分布数据无用），只有分档才看得出来。
-    这是**报告用**的启发式（判分仍用数值精确匹配），规则与 `build_cot_sft.py` 的生成器对齐。
+    这是**报告用**的启发式（判分仍用数值精确匹配），规则与 `build_cot_sft.py` 的生成器对齐；
+    对齐与否由 `tests/test_eval_scripts.py::test_bucket_of_covers_all_generators` 逐个生成器守住。
     """
     digits = [int(x) for x in re.findall(r"\d+", question)]
     scale = "big" if (max(digits) if digits else 0) >= 100 else "small"
-    if any(k in question for k in ("苹果", "平均", "剩下", "原有", "多少元", "多少本")):
+    if any(k in question for k in _WORD_HINTS):
         return f"word_{scale}"
     if "×" in question or "乘" in question:
         return f"mul_{scale}"

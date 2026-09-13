@@ -9,6 +9,7 @@
 """
 import json
 import os
+import random
 import subprocess
 import sys
 
@@ -131,6 +132,32 @@ def test_eval_thinking_buckets_by_difficulty():
     assert bucket_of("你好") == "other"
 
 
+def test_bucket_of_covers_all_generators():
+    """`bucket_of` 的关键词表必须覆盖 `build_cot_sft.py` 的**每一个**生成器。
+
+    真实事故（本次修复）：`gen_price`（"…需要多少钱？"）与 `gen_discount`
+    （"原价…打 N 折…"）不命中原关键词表，于是 hard 集里约 2/9 的题目全落进 `other`：
+    平均准确率看着正常，§4.5 的分档表却整类缺席——**没有任何东西会报红**。
+
+    这里逐个生成器断言"分桶不是 other"，让"新增题型忘了更新关键词表"在单测里就暴露。
+    （不依赖 torch：生成器与 bucket_of 都是纯 Python。）
+    """
+    sys.path.insert(0, SCRIPTS)
+    sys.path.insert(0, os.path.join(SCRIPTS, "data"))   # 造数据脚本已按角色归到 scripts/data/
+    from eval_thinking import bucket_of
+
+    import build_cot_sft as cot
+
+    offenders = []
+    for label, gens in (("hard", cot.GENERATORS), ("easy", cot.EASY_GENERATORS)):
+        for gen in gens:
+            row = gen(random.Random(0))          # 固定种子：题面模板与抽样值都确定
+            bucket = bucket_of(row["instruction"])
+            if bucket == "other":
+                offenders.append(f"{label}/{gen.__name__}: {row['instruction'][:40]}")
+    assert not offenders, f"这些题型会整类落进 other（分档表会静默缺一类题）：{offenders}"
+
+
 def test_eval_prompt_matches_sft_training_format(tiny_tokenizer):
     """评测 prompt 必须与 SFT 训练时的 user 内容逐 token 一致。
 
@@ -165,11 +192,14 @@ def test_all_inference_chat_builders_share_training_format(tiny_tokenizer):
     以前 4 处各写各的：训练侧是 `instruction + "\\n" + input`，
     而 sft_trainer 采样 / chat_probe / eval_thinking 都只传裸文本——
     少一个换行，推理与训练口径不一致（且同一个模型在三处表现会不一样）。
+
+    本次补上第 5 处：`scripts/generate.py --chat`（生产推理 CLI）同样漏了这一步。
     """
     from minigpt.data.sft_dataset import build_user_content
     from minigpt.train.sft_trainer import build_chat as sft_build_chat
     from scripts.chat_probe import build_chat as probe_build_chat
     from scripts.eval_thinking import row_prompt
+    from scripts.generate import build_prompt as cli_build_prompt
 
     tok = tiny_tokenizer
     text = "什么是AI？"
@@ -179,6 +209,9 @@ def test_all_inference_chat_builders_share_training_format(tiny_tokenizer):
     assert sft_build_chat(tok, text) == expected
     assert probe_build_chat(tok, text) == expected
     assert row_prompt({"instruction": text, "input": ""}) == build_user_content(text)
+    assert cli_build_prompt(tok, text, chat=True) == expected
+    # 非 chat 模式必须原样透传（补全型用法不该被 chat 模板污染）
+    assert cli_build_prompt(tok, text, chat=False) == text
 
 
 def test_cot_format_constants_are_single_sourced():

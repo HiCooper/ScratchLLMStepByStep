@@ -196,6 +196,7 @@ fi
 if [ "$DRY_RUN" = "1" ]; then
   cat <<EOF
 [dry-run] 预设=$PRESET nproc=$NPROC 目标步数=$STEPS
+  0) 体检：python3 scripts/data/audit_dataset.py            # AGENTS.md 硬性约定 5：不加 --quick
   1) 数据：python3 scripts/data/build_pretrain_bin.py build --corpus-jsonl dataset/pretrain_t2t.jsonl --tokenizer-dir models/tokenizer_v3 --out-bin $FULL_BIN --max-lines $CORPUS_LINES
   2) 训练：OUT_DIR=$OUT_DIR LOG=$LOG_FILE DATA_BIN=$FULL_BIN NPROC=$NPROC TARGET_STEPS=$STEPS PRESET_ARGS="$PRESET_ARGS" setsid nohup bash scripts/train_pretrain_resilient.sh > $OUT_DIR.watchdog.log 2>&1 &
   3) 守护：setsid nohup bash scripts/checkpoint_janitor.sh 60 2 120 > /tmp/janitor.log 2>&1 &
@@ -203,6 +204,22 @@ if [ "$DRY_RUN" = "1" ]; then
   5) 看板：setsid nohup python3 scripts/train_dashboard.py --serve --port 8099 --refresh 5 --grad-clip 1.0 > /tmp/dashboard.log 2>&1 &
 EOF
   exit 0
+fi
+
+# ---------------- 5) 数据集体检（AGENTS.md 硬性约定 5） ----------------
+# 建 bin / 开训前必须跑完整体检，且**不加 `--quick`**：`--quick` 会跳过语料单遍扫描，
+# 而"脏行"恰恰只在那一步才暴露——实测一次脏行让建 bin 在 95% / 65 分钟后崩溃且没落 meta，
+# 而体检一行就报出来了。audit 只在"真的要建 bin / 真的要起训练"时才跑，
+# 避免每次查看状态都重扫 1.2GB 语料（本脚本要能反复重入）。
+NEEDS_AUDIT=0
+if [ ! -f "$FULL_BIN" ]; then NEEDS_AUDIT=1; fi
+if [ -z "$RUNNING_PID" ] && [ ! -f "$OUT_DIR/final.pt" ]; then NEEDS_AUDIT=1; fi
+if [ "$NEEDS_AUDIT" = "1" ]; then
+  log "==== 数据集体检（scripts/data/audit_dataset.py，无 --quick）===="
+  if ! python3 scripts/data/audit_dataset.py; then
+    echo "数据集体检存在 BLOCKER：先解决上面的问题，再建 bin / 开训（不要用 --quick 绕过）。"
+    exit 1
+  fi
 fi
 
 if [ ! -f "$FULL_BIN" ]; then

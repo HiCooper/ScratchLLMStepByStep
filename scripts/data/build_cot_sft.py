@@ -15,7 +15,9 @@ import os
 import random
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 本文件在 scripts/data/ 下，仓库根要往上两级（搬迁到子目录后漏改过一次：
+# 兜底成 <repo>/scripts，模块级 import minigpt 直接 ModuleNotFoundError）
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 # 格式标记的**唯一**定义在 minigpt/cot_format.py（推理与评测也从那里取）——
 # 以前这里和 generation.py 各写一份，改一处就会静默让评测掉进"取最后一个数字"的兜底。

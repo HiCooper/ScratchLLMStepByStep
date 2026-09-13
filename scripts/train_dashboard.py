@@ -16,11 +16,14 @@ import glob
 import json
 import os
 import re
-import statistics
 import subprocess
-import time
+import sys
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+from minigpt.train.curve_utils import rate_from_evals  # noqa: E402
 
 EVAL_RE = re.compile(
     r"(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+lr=(?P<lr>[\d.eE+-]+),\s+"
@@ -105,31 +108,13 @@ def resolve_run(args, scan_bytes=2_000_000):
 
 
 def _rate_from_evals(evals, tokens_per_step, max_gap_factor=3.0):
-    """从相邻评估点估计速率；**排除重启/停机造成的巨大空档**。
+    """看板入口：实现在 `minigpt/train/curve_utils.rate_from_evals`（与交付报告共用）。
 
-    真实事故：机器重启后第一次评估进来时，最后两个点的间隔含 5 小时停机
-    （21:47 的 step 76000 → 23:0x 的 80000），看板立刻显示 "1.7k tok/s / ETA 219h"，
-    要等下一个评估点才自愈。做法：取最近若干个区间的 s/step 中位数，
-    明显偏离中位数（>3×）的区间视为停机造成的、丢弃。
-
-    只有两个评估点时无从判断（没有中位数可依），只能照用——此时刚重启后的第一次
-    估计仍可能偏大，属已知局限。
+    以前这里和 `report_training.py` 各写一份，报告那份只看最后两点、没有剔除停机
+    空档，于是同一个 run 看板与报告给出相差 25 倍的吞吐。名字保留是为了测试与调用点
+    稳定；要改口径请改 curve_utils，两处会一起变。
     """
-    def _ts(x):
-        return time.mktime(time.strptime(x["ts"], "%Y-%m-%d %H:%M:%S"))
-
-    pairs = []
-    recent = evals[-6:]                     # 配对必须是 (x[i], x[i+1] identical slice 会配到自己)
-    for a, b in zip(recent, recent[1:]):
-        dsteps, dt = b["step"] - a["step"], _ts(b) - _ts(a)
-        if dsteps > 0 and dt > 0:
-            pairs.append(dt / dsteps)
-    if not pairs:
-        return None
-    med = statistics.median(pairs)
-    good = [p for p in pairs if p <= med * max_gap_factor]
-    s = statistics.median(good or pairs)
-    return {"s_per_step": s, "tok_per_s": tokens_per_step / s}
+    return rate_from_evals(evals, tokens_per_step, max_gap_factor)
 
 
 def _configured_max_steps(out_dir, cache={}):
