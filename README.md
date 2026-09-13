@@ -82,14 +82,16 @@ fp16 + AdamW 训练时按 **16 字节/参数**估显存（fp16 权重 2 + 梯度
 │   ├── model/                 # attention / transformer / checkpoint（重建+宽容加载）/ generation
 │   ├── data/                  # pretrain_dataset(.bin memmap + 分块验证集切分) / sft_dataset(逐轮掩码)
 │   └── train/                 # trainer + schedule/ddp_utils/checkpoint_io/optim + metrics + 两个入口
-├── scripts/                   # 数据 / 训练 / 评测 / 监控
-│   ├── download_data.sh / train_tokenizer.py / parquet_to_jsonl.py / build_pretrain_bin.py
-│   ├── build_cot_sft.py       # 生成 SFT/CoT 数据（保证 train/eval 零重合）
-│   ├── evaluate_pretrain.py / eval_thinking.py / generate.py
-│   ├── train_dashboard.py / report_training.py / chat_probe.py / check_env.py / estimate_resources.py
-│   ├── validate_pretrain.py / validate_ddp.py           # 单卡与 DDP 链路验证
-│   ├── train_pretrain_resilient.sh / checkpoint_janitor.sh / pretrain_start.sh
-│   └── run_downstream*.sh / run_code_domain.sh / run_domain_compare.sh / run_capacity_ablation.sh
+├── scripts/                   # 按**角色**分目录；生产链路（正在跑的那条）留在顶层
+│   ├── train_pretrain_resilient.sh / checkpoint_janitor.sh / pretrain_start.sh   # 训练（含自愈与磁盘守护）
+│   ├── train_dashboard.py / watch_training.sh           # 监控（网页看板 / 终端看板）
+│   ├── run_v5_downstream.sh / run_downstream*.sh / wait_and_run_downstream.sh   # 下游链路
+│   ├── watch_v5_chain.sh / resume_v5_chain.sh           # 接力与故障恢复（机器重启后跑它）
+│   ├── evaluate_pretrain.py / eval_thinking.py / chat_probe.py / generate.py    # 评测与推理
+│   ├── report_training.py / verify_v5_delivery.py       # 交付报告与自检
+│   ├── data/         # 语料下载/清洗/配比/建 bin/训分词器/造 CoT/体检
+│   ├── tools/        # check_env / estimate_resources / validate_pretrain / validate_ddp
+│   └── experiments/  # 领域续训与容量消融配方（**不在**交付链路里）
 ├── skills/minigpt-train/      # agent skill：SKILL.md + preflight 体检 + pipeline 一键流水线 + references/
 ├── tests/                     # pytest 单元测试（200 项，CPU 即可运行，不需要数据与 GPU）
 ├── eval_sets/                 # chat_probe 的场景集与探针结论（随仓库跟踪的评测固件）
