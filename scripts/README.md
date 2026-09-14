@@ -15,10 +15,10 @@ scripts/
 
 | 脚本 | 做什么 | 用在哪 |
 |---|---|---|
-| `train_pretrain_resilient.sh` | 自愈长训：崩溃/被杀自动从最近 checkpoint 续训 | 训练（**正在运行**） |
-| `checkpoint_janitor.sh` | 每个目录只留最近 N 个 checkpoint，防磁盘写满 | 训练（**正在运行**） |
-| `train_dashboard.py` | 看板：网页 8099 / `--once` / `--plot` | 监控（**正在运行**） |
-| `watch_v5_chain.sh` | v5 接力：等 `final.pt` → 跑下游；并二级监督训练守护 | 交付（**正在运行**） |
+| `train_pretrain_resilient.sh` | 自愈长训：崩溃/被杀自动从最近 checkpoint 续训 | 训练 |
+| `checkpoint_janitor.sh` | 每个目录只留最近 N 个 checkpoint，防磁盘写满 | 训练 |
+| `train_dashboard.py` | 看板：网页 8099 / `--once` / `--plot` | 监控 |
+| `watch_v5_chain.sh` | v5 接力：等 `final.pt` → 跑下游；并二级监督训练守护 | 交付 |
 | `resume_v5_chain.sh` | 一键恢复全链路（幂等）；**机器重启后必须跑它** | 故障恢复 |
 | `run_v5_downstream.sh` | v5 下游：SFT → CoT easy → CoT hard → 评测 → 报告 → 自检 | 交付 |
 | `run_downstream.sh` / `run_downstream_evals.sh` | 通用下游 / 只跑评测出样（`pipeline.sh` 用） | 通用流水线 |
